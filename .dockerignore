@@ -1,0 +1,17 @@
+# Keep the build context small and free of anything that must never reach an image
+# layer. .git in particular carries the whole history, including any secret ever
+# committed and later "removed".
+.git
+.gitignore
+.gitattributes
+.gitleaks.toml
+.github
+
+# Always install from the lockfile in the deps stage rather than copying a host tree
+# that may be stale, built for another platform, or contain devDependencies.
+node_modules
+
+Dockerfile
+.dockerignore
+*.md
+charts

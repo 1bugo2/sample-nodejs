@@ -1,0 +1,45 @@
+version: 2
+
+# Scanning for vulnerable dependencies only tells us we have a problem. Dependabot is the
+# other half: it opens the PR that fixes it. Without this, the dependency-scan gate
+# eventually blocks every PR on a CVE nobody has time to chase.
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    # Do not adopt a release the day it ships. Compromised npm packages are typically
+    # caught and yanked within days, and a bot that upgrades instantly is the fastest
+    # path from someone else's stolen publish token into our image.
+    cooldown:
+      default-days: 7
+    groups:
+      # Patch/minor bumps are almost always safe and reviewing them individually is noise.
+      # Majors stay separate because they need actual attention.
+      non-major:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "fix(deps)"
+      prefix-development: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "ci(deps)"
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "fix(docker)"

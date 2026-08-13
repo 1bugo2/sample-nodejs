@@ -1,0 +1,13 @@
+# Store and check out every text file with LF, regardless of who clones the repo.
+#
+# This lives in the repo on purpose: Git for Windows ships core.autocrlf=true at system
+# level, and per-developer config does not travel with a clone. Without this, files get
+# committed with CRLF, diffs report every line as changed, and a CRLF shell script
+# copied into a Linux image fails with a confusing "\r: not found".
+* text=auto eol=lf
+
+# Never line-ending convert binaries or the lockfile.
+*.png binary
+*.jpg binary
+*.ico binary
+package-lock.json -text

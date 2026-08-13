@@ -27,25 +27,28 @@ ENV NODE_ENV=production \
 # tini runs as PID 1 with correct default handling and forwards SIGTERM to node, which
 # is then an ordinary process and terminates immediately. Fixing this in the image keeps
 # it out of the application's code.
-RUN apk add --no-cache tini=~0.19
-
-# No package manager belongs in a runtime container: dependencies are already resolved
-# in the deps stage, and a package manager is a ready-made tool for pulling code into a
-# compromised container.
 #
-# This is also load-bearing for the image scan. Every HIGH/CRITICAL finding in this base
-# image comes from the dependency trees bundled with npm and corepack (tar CRITICAL,
-# brace-expansion, ip-address, sigstore, picomatch) - not from Alpine, and not from this
-# app. Deleting them clears those CVEs legitimately rather than suppressing them in a
-# .trivyignore. yarn scans clean today but goes for the same reason.
-RUN rm -rf /usr/local/lib/node_modules/npm \
-           /usr/local/lib/node_modules/corepack \
-           /usr/local/bin/npm \
-           /usr/local/bin/npx \
-           /usr/local/bin/corepack \
-           /usr/local/bin/yarn \
-           /usr/local/bin/yarnpkg \
-           /opt/yarn-v*
+# The removals in the same layer: no package manager belongs in a runtime container.
+# Dependencies are already resolved in the deps stage, and a package manager is a
+# ready-made tool for pulling code into a compromised container.
+#
+# That removal is also load-bearing for the image scan. Every HIGH/CRITICAL finding in
+# this base image comes from the dependency trees bundled with npm and corepack (tar
+# CRITICAL, brace-expansion, ip-address, sigstore, picomatch) - not from Alpine, and not
+# from this app. Deleting them clears those CVEs legitimately rather than suppressing
+# them in a .trivyignore. yarn scans clean today but goes for the same reason.
+#
+# Single RUN so the deletions land in the same layer as the install; separate layers
+# would leave the removed files recoverable in the image history.
+RUN apk add --no-cache tini=~0.19 \
+    && rm -rf /usr/local/lib/node_modules/npm \
+              /usr/local/lib/node_modules/corepack \
+              /usr/local/bin/npm \
+              /usr/local/bin/npx \
+              /usr/local/bin/corepack \
+              /usr/local/bin/yarn \
+              /usr/local/bin/yarnpkg \
+              /opt/yarn-v*
 
 WORKDIR /app
 
@@ -53,18 +56,20 @@ WORKDIR /app
 COPY --chown=node:node --from=deps /app/node_modules ./node_modules
 COPY --chown=node:node package.json app.js ./
 
-# uid 1000, shipped by the base image. Nothing here needs root, and the pod
-# securityContext asserts runAsNonRoot to enforce it independently.
-USER node
+# Numeric rather than `USER node`, though they are the same uid 1000 shipped by the base
+# image. Kubernetes evaluates runAsNonRoot against the numeric id and cannot resolve a
+# username from the image, so a named USER would leave the pod failing to start under
+# runAsNonRoot: true unless runAsUser were also set.
+USER 1000:1000
 
 # Documentation only. The effective port comes from PORT and the chart's containerPort.
 EXPOSE 8080
 
-# Kubernetes ignores HEALTHCHECK and uses the probes in the chart instead, but this
-# makes `docker run` and the CI smoke test self-verifying. String form on purpose so
-# the shell expands PORT.
+# Kubernetes ignores HEALTHCHECK and uses the probes in the chart instead, but this makes
+# `docker run` and the CI smoke test self-verifying. Explicit `sh -c` in JSON form rather
+# than shell form, so PORT is still expanded without the implicit-shell ambiguity.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -qO- "http://127.0.0.1:${PORT}/live" || exit 1
+  CMD ["/bin/sh", "-c", "wget -qO- \"http://127.0.0.1:${PORT}/live\" || exit 1"]
 
 # tini at PID 1, node as its child. Exec form throughout: shell form would insert
 # /bin/sh between them, which does not forward signals either.

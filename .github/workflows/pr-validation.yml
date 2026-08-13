@@ -1,0 +1,161 @@
+name: PR Validation
+
+# Every change reaching main must pass through here first. main is protected and
+# requires the aggregate "PR gate" check below, so these scans are not advisory.
+on:
+  pull_request:
+    branches: [main]
+  # Lets us exercise the pipeline from a branch without opening throwaway PRs.
+  workflow_dispatch:
+
+# Pushing a new commit to a PR makes the in-flight run obsolete. Cancelling it keeps
+# feedback fast and avoids burning runner minutes on results nobody will read.
+concurrency:
+  group: pr-validation-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+# Default to read-only and elevate per job. A compromised action in the SAST job
+# should not be able to push code or publish packages.
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # Gitleaks scans commit history, not just the working tree: a secret that was
+          # committed and then "removed" in a later commit is still leaked.
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Fail the job on any finding. There is no acceptable number of committed secrets.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
+
+  sast:
+    name: SAST
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Required to publish findings to the repository's Security > Code scanning tab.
+      security-events: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # Semgrep is installed via pipx rather than run as a `container:` job. The official
+      # image is Alpine/musl based, and GitHub's JavaScript actions (upload-sarif) inject a
+      # glibc node binary that cannot execute there.
+      - name: Install Semgrep
+        run: pipx install semgrep
+
+      - name: Scan
+        # One scan produces the SARIF used for BOTH reporting and gating, so the gate can
+        # never disagree with what reviewers see in the Security tab.
+        # --metrics=off keeps source code and findings off Semgrep's telemetry endpoint.
+        run: |
+          semgrep scan \
+            --config=p/javascript \
+            --config=p/nodejs \
+            --config=p/owasp-top-ten \
+            --config=p/secrets \
+            --sarif --output=semgrep.sarif \
+            --metrics=off \
+            --no-error
+        # --no-error: never fail here. Gating is a separate, explicit step below so that
+        # findings always get uploaded even when the gate is going to fail.
+
+      - name: Upload findings to code scanning
+        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      - name: Gate on critical findings
+        # The task requires failing on critical vulnerabilities. Semgrep maps its ERROR
+        # severity to SARIF level "error"; WARNING/INFO map to warning/note and are
+        # reported for triage without blocking the PR.
+        run: |
+          count=$(jq '[.runs[].results[] | select(.level == "error")] | length' semgrep.sarif)
+          echo "ERROR-severity findings: $count"
+          if [ "$count" -gt 0 ]; then
+            jq -r '.runs[].results[] | select(.level == "error")
+              | "::error file=\(.locations[0].physicalLocation.artifactLocation.uri),line=\(.locations[0].physicalLocation.region.startLine)::\(.message.text)"' \
+              semgrep.sarif
+            echo "Blocking: $count critical SAST finding(s). See Security > Code scanning."
+            exit 1
+          fi
+
+  dependency-scan:
+    name: Dependency scan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # Same report-then-gate split as the SAST job. It is also the safe pattern here:
+      # trivy-action does not reliably honour exit-code while rendering the SARIF
+      # template, so a scan that both reports and gates can silently pass.
+      - name: Trivy filesystem scan (report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          format: sarif
+          output: trivy-fs.sarif
+          # No severity filter: the Security tab should show the full picture, including
+          # the unfixed and low-severity findings the gate below deliberately tolerates.
+
+      - name: Upload findings to code scanning
+        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      - name: Gate on high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          # A CVE with no released fix cannot be actioned by bumping a dependency, so
+          # blocking on it would only teach people to bypass the gate. Still reported above.
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+        env:
+          # The vulnerability DB is already in the action's cache from the report step,
+          # so this second pass costs seconds rather than another download.
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_JAVA_DB_UPDATE: "true"
+
+      - name: npm audit
+        # Second opinion from a different vulnerability database. Trivy and the npm advisory
+        # database do not always agree, and disagreement is itself useful signal.
+        if: always()
+        run: npm audit --audit-level=high
+
+  pr-gate:
+    name: PR gate
+    # Single aggregate check to require in branch protection. Adding a new scan job only
+    # needs a `needs:` entry here rather than a settings change.
+    if: always()
+    needs: [secret-scan, sast, dependency-scan]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify all validation jobs succeeded
+        run: |
+          echo '${{ toJSON(needs) }}' | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"'
+          echo '${{ toJSON(needs) }}' | jq -e 'all(.[]; .result == "success")' > /dev/null \
+            || { echo "::error::One or more validation jobs did not succeed - blocking merge."; exit 1; }
+          echo "All validation jobs passed."

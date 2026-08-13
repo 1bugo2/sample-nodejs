@@ -1,0 +1,21 @@
+# Gitleaks configuration.
+#
+# We inherit the upstream default ruleset rather than hand-rolling patterns: it is
+# maintained, covers ~150 provider formats, and a bespoke list would silently rot.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Paths that produce false positives without carrying real secrets"
+
+paths = [
+  # npm lockfiles are full of base64 "integrity" digests that trip entropy heuristics.
+  # These are content hashes of public tarballs, not credentials.
+  '''package-lock\.json''',
+]
+
+regexes = [
+  # SOPS-encrypted values are safe to commit by design - the ciphertext is the point.
+  # Without this, every encrypted secret in the GitOps flow would be flagged.
+  '''ENC\[AES256_GCM,data:.*\]''',
+]

@@ -71,7 +71,9 @@ jobs:
 
       - name: Upload findings to code scanning
         uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
-        if: always()
+        # Upload even on a failing gate, but only if the scan got far enough to write a
+        # report - otherwise a failed build adds a misleading "path does not exist" error.
+        if: always() && hashFiles('semgrep.sarif') != ''
         with:
           sarif_file: semgrep.sarif
           category: semgrep
@@ -116,7 +118,9 @@ jobs:
 
       - name: Upload findings to code scanning
         uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
-        if: always()
+        # Upload even on a failing gate, but only if the scan got far enough to write a
+        # report - otherwise a failed build adds a misleading "path does not exist" error.
+        if: always() && hashFiles('trivy-fs.sarif') != ''
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -161,6 +165,12 @@ jobs:
           # Advisory rather than blocking: hadolint's style rules are opinionated, and a
           # failing lint should not be indistinguishable from a critical CVE.
           failure-threshold: error
+
+      # The default docker driver cannot export a build cache. This sets up the
+      # docker-container driver, which supports both `cache-to: type=gha` and loading the
+      # result into the local daemon so the smoke test can run it.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build image
         # Deliberately built and NOT pushed. Nothing reaches a registry from a pull
@@ -224,7 +234,9 @@ jobs:
 
       - name: Upload findings to code scanning
         uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
-        if: always()
+        # Upload even on a failing gate, but only if the scan got far enough to write a
+        # report - otherwise a failed build adds a misleading "path does not exist" error.
+        if: always() && hashFiles('trivy-image.sarif') != ''
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image

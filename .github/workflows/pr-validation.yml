@@ -145,12 +145,112 @@ jobs:
         if: always()
         run: npm audit --audit-level=high
 
+  image:
+    name: Image build, smoke test and scan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        with:
+          dockerfile: Dockerfile
+          # Advisory rather than blocking: hadolint's style rules are opinionated, and a
+          # failing lint should not be indistinguishable from a critical CVE.
+          failure-threshold: error
+
+      - name: Build image
+        # Deliberately built and NOT pushed. Nothing reaches a registry from a pull
+        # request; the release workflow on main is the only thing that publishes.
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: sample-nodejs:pr-${{ github.event.pull_request.number || github.run_id }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the built image
+        # `docker build` succeeds even when the app is broken, because building never runs
+        # it. Without this, a broken app produces a clean scan, a successful push and a
+        # CrashLoopBackOff in the cluster with every pipeline step green.
+        #
+        # Asserts exactly what the Helm chart depends on: the two probe endpoints, the
+        # Ingress path, and the metrics scrape target.
+        env:
+          IMAGE: sample-nodejs:pr-${{ github.event.pull_request.number || github.run_id }}
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 8099:8080 "$IMAGE"
+          trap 'docker logs smoke || true; docker rm -f smoke >/dev/null 2>&1 || true' EXIT
+
+          # --retry-all-errors covers the startup race without guessing a sleep duration.
+          curl -fsS --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null \
+            http://127.0.0.1:8099/live
+          echo "livenessProbe target  /live   OK"
+
+          curl -fsS -o /dev/null http://127.0.0.1:8099/ready
+          echo "readinessProbe target /ready  OK"
+
+          body=$(curl -fsS http://127.0.0.1:8099/my-app)
+          test "$body" = "Hello, World!" || { echo "::error::/my-app returned '$body'"; exit 1; }
+          echo "Ingress main path     /my-app OK"
+
+          curl -fsS http://127.0.0.1:8099/metrics | grep -q '^root_access_total '
+          echo "metrics scrape target /metrics OK"
+
+          # Regression guard for the tini/PID-1 fix: without an init process at PID 1,
+          # node discards SIGTERM and this takes the full 10s timeout before SIGKILL.
+          start=$(date +%s)
+          docker stop smoke >/dev/null
+          elapsed=$(( $(date +%s) - start ))
+          echo "container stopped in ${elapsed}s"
+          test "$elapsed" -lt 5 || {
+            echo "::error::SIGTERM not honoured (${elapsed}s) - init process at PID 1 is missing"
+            exit 1
+          }
+
+      - name: Trivy image scan (report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: sample-nodejs:pr-${{ github.event.pull_request.number || github.run_id }}
+          format: sarif
+          output: trivy-image.sarif
+
+      - name: Upload findings to code scanning
+        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      - name: Gate on high and critical image vulnerabilities
+        # The brief requires blocking deployment on high-severity image findings. Gating
+        # here, before the release workflow can ever push, means a vulnerable image is
+        # never published rather than published and then flagged.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: sample-nodejs:pr-${{ github.event.pull_request.number || github.run_id }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_JAVA_DB_UPDATE: "true"
+
   pr-gate:
     name: PR gate
     # Single aggregate check to require in branch protection. Adding a new scan job only
     # needs a `needs:` entry here rather than a settings change.
     if: always()
-    needs: [secret-scan, sast, dependency-scan]
+    needs: [secret-scan, sast, dependency-scan, image]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify all validation jobs succeeded

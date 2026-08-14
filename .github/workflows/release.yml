@@ -202,18 +202,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
           DIGEST: ${{ steps.push.outputs.digest }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
         run: |
           set -euo pipefail
-          git tag -a "v$VERSION" -m "Release v$VERSION"
+
+          # An annotated tag records who and when, but git refuses to write one without an
+          # identity and the runner has none configured by default. Set per-command rather
+          # than globally so it cannot leak into any other step.
+          git -c user.name='sample-nodejs release' \
+              -c user.email='noamya7312@gmail.com' \
+              tag -a "v$VERSION" -m "Release v$VERSION (${DIGEST})"
           git push origin "v$VERSION"
-          # --generate-notes builds the changelog from the merged PRs, so the Conventional
-          # Commit subjects become the release notes without a separate changelog file.
-          gh release create "v$VERSION" \
-            --title "v$VERSION" \
-            --generate-notes \
-            --notes-start-tag "${{ steps.version.outputs.previous }}" \
-            sbom.spdx.json \
-            || gh release create "v$VERSION" --title "v$VERSION" --generate-notes sbom.spdx.json
+
+          # --generate-notes builds the changelog from merged PRs, so Conventional Commit
+          # subjects become the release notes without maintaining a CHANGELOG file.
+          # --notes-start-tag is only valid once a previous tag exists.
+          notes=(--generate-notes)
+          if [ "$PREVIOUS" != "none" ]; then
+            notes+=(--notes-start-tag "$PREVIOUS")
+          fi
+          gh release create "v$VERSION" --title "v$VERSION" "${notes[@]}" sbom.spdx.json
 
       - name: Promote to the GitOps repository
         env:

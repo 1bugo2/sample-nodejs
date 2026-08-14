@@ -1,0 +1,33 @@
+Evidence: what runs is what was scanned, and the registry is genuinely private
+Captured 2026-08-14T18:29:46Z
+
+==============================================================
+1. IMAGE RUNNING IN THE CLUSTER
+==============================================================
+deployment spec : ghcr.io/1bugo2/sample-nodejs@sha256:c7ff9100255dde1f96964e182901372848faa99dfe055f230242adf1c7f131ef
+pod sample-nodejs-dev-8bcc47b9d-ntnxb: ghcr.io/1bugo2/sample-nodejs@sha256:c7ff9100255dde1f96964e182901372848faa99dfe055f230242adf1c7f131ef
+pod sample-nodejs-dev-8bcc47b9d-x52xm: ghcr.io/1bugo2/sample-nodejs@sha256:c7ff9100255dde1f96964e182901372848faa99dfe055f230242adf1c7f131ef
+
+==============================================================
+2. DIGEST COMMITTED IN THE GITOPS REPO (what ArgoCD reads)
+==============================================================
+  digest: "sha256:c7ff9100255dde1f96964e182901372848faa99dfe055f230242adf1c7f131ef"
+  tag: v1.0.1
+
+deploy history:
+  d5527b1  2026-08-14  Revert "deploy(dev): sample-nodejs v1.0.2"
+  54d0b02  2026-08-14  deploy(dev): sample-nodejs v1.0.2
+  1bdf622  2026-08-14  deploy(dev): sample-nodejs v1.0.1
+  059fbe3  2026-08-14  feat: add app-of-apps root application
+  93f2536  2026-08-14  feat: add dev Application tracking chart 1.0.0
+  a19f4f7  2026-08-14  feat: register the GHCR OCI chart repository
+
+==============================================================
+3. THE REGISTRY IS PRIVATE (anonymous client refused)
+==============================================================
+anonymous pull of IMAGE ghcr.io/1bugo2/sample-nodejs:v1.0.0  -> HTTP 403
+anonymous pull of CHART ghcr.io/1bugo2/charts/sample-nodejs:1.0.0 -> HTTP 200
+
+403 on the image = private, as the task requires.
+200 on the chart = public by choice, so the chart is reviewable and installable
+against someone else's registry without handing out a credential.

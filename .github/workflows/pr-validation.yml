@@ -257,12 +257,72 @@ jobs:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_JAVA_DB_UPDATE: "true"
 
+  chart:
+    name: Chart lint and validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      CHART: charts/sample-nodejs
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: helm lint
+        # --strict promotes lint warnings to errors. Also exercises values.schema.json,
+        # which is where a typo like `replicaCount: "two"` gets caught.
+        run: helm lint "$CHART" --strict
+
+      - name: Render manifests
+        # Rendered twice: once with defaults, once with every optional feature on. The
+        # optional templates (NetworkPolicy, ServiceMonitor, Secret) are off by default, so
+        # a syntax error in them would otherwise never be exercised by CI.
+        run: |
+          helm template rel "$CHART" > rendered-default.yaml
+          helm template rel "$CHART" \
+            --set networkPolicy.enabled=true \
+            --set metrics.serviceMonitor.enabled=true \
+            --set secretEnv.EXAMPLE=value \
+            > rendered-all.yaml
+          echo "default: $(grep -c '^kind:' rendered-default.yaml) objects"
+          echo "all-on:  $(grep -c '^kind:' rendered-all.yaml) objects"
+
+      - name: Validate against Kubernetes API schemas
+        # helm lint checks templating; it does not check that the output is a valid
+        # Kubernetes object. kubeconform validates against the real OpenAPI schemas, which
+        # catches a misspelled field the API server would reject at apply time.
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz kubeconform
+          ./kubeconform -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered-default.yaml rendered-all.yaml
+
+      - name: Install Checkov
+        run: pipx install checkov
+
+      - name: Checkov (advisory)
+        # Advisory, not gating. Checkov's OSS checks carry no severity, and it applies
+        # Deployment rules to any Pod - it demands readiness and liveness probes on the
+        # one-shot `helm test` pod, which is meaningless. Gating on that would either block
+        # legitimate work or push people to bulk-skip checks, which is worse than triaging
+        # a report. Genuine findings from it were fixed rather than suppressed.
+        run: checkov -d "$CHART" --framework helm --compact --quiet --soft-fail -o sarif --output-file-path .
+
+      - name: Upload Checkov findings to code scanning
+        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        if: always() && hashFiles('results.sarif') != ''
+        with:
+          sarif_file: results.sarif
+          category: checkov
+
   pr-gate:
     name: PR gate
     # Single aggregate check to require in branch protection. Adding a new scan job only
     # needs a `needs:` entry here rather than a settings change.
     if: always()
-    needs: [secret-scan, sast, dependency-scan, image]
+    needs: [secret-scan, sast, dependency-scan, image, chart]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify all validation jobs succeeded

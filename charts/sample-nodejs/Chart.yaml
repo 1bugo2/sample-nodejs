@@ -1,0 +1,25 @@
+apiVersion: v2
+name: sample-nodejs
+description: Stateless Node.js web service with Prometheus metrics, deployed via ArgoCD
+
+# A Deployment, not a StatefulSet - see the "Deployment vs StatefulSet" section of the
+# repository README for the reasoning.
+type: application
+
+# Both are placeholders overwritten by the release pipeline:
+#   version    - the chart's own SemVer, bumped when the chart changes
+#   appVersion - the application version, i.e. the image tag being deployed
+# They are separate on purpose: a chart-only change (say a probe timeout) should bump the
+# chart version without implying the application was rebuilt.
+version: 0.1.0
+appVersion: "1.0.0"
+
+home: https://github.com/1bugo2/sample-nodejs
+sources:
+  - https://github.com/1bugo2/sample-nodejs
+
+# autoscaling/v2 and PodDisruptionBudget policy/v1 both require 1.25+.
+kubeVersion: ">=1.25.0-0"
+
+maintainers:
+  - name: Noam Yanai

@@ -1,0 +1,32 @@
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "sample-nodejs.fullname" . }}
+  labels:
+    {{- include "sample-nodejs.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "sample-nodejs.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # Percentage of the CPU *request*, not of a core. With requests.cpu=100m, 70%
+          # means scaling once average usage passes 70m.
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: {{ .Values.autoscaling.behavior.scaleUp.stabilizationWindowSeconds }}
+    scaleDown:
+      # Deliberately far longer than scaleUp. Removing replicas while traffic is still
+      # arriving causes the outage autoscaling exists to prevent, and a short window makes
+      # the replica count oscillate on bursty traffic.
+      stabilizationWindowSeconds: {{ .Values.autoscaling.behavior.scaleDown.stabilizationWindowSeconds }}
+{{- end }}

@@ -23,6 +23,7 @@ env:
   CHART_PATH: charts/sample-nodejs
   GITOPS_REPO: 1bugo2/sample-nodejs-gitops
   GITOPS_VALUES: envs/dev/values.yaml
+  GITOPS_APP: argocd/applications/sample-nodejs-dev.yaml
 
 jobs:
   release:
@@ -112,6 +113,9 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ steps.version.outputs.version }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -247,6 +251,16 @@ jobs:
 
           yq -i ".image.digest = \"${DIGEST}\"" "$GITOPS_VALUES"
           yq -i ".image.tag = \"v${VERSION}\"" "$GITOPS_VALUES"
+
+          # Also advance the chart version the Application tracks. Without this the image
+          # is promoted but the chart is not, so a change to a probe or a resource limit
+          # would be published to the registry and then never actually deployed - the
+          # pipeline would look green while the cluster ignored it.
+          # Selects by chart name because sources is a list: the second entry is the values
+          # ref and has no chart field.
+          VERSION="$VERSION" yq -i \
+            '(.spec.sources[] | select(.chart == "sample-nodejs") | .targetRevision) = strenv(VERSION)' \
+            "$GITOPS_APP"
 
           if git diff --quiet; then
             echo "digest unchanged - nothing to promote"

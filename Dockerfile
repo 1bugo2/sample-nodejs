@@ -19,6 +19,22 @@ FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a55
 ENV NODE_ENV=production \
     PORT=8080
 
+# Standard OCI annotations, supplied by the release pipeline. `image.source` is what lets
+# GitHub link the package back to this repository, and `image.revision` makes a running
+# container traceable to the exact commit that produced it - which is the first thing you
+# want during an incident.
+#
+# Trade-off worth stating: because revision changes every commit, two releases of identical
+# code no longer share a digest. Traceability is worth more here than digest stability.
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.title="sample-nodejs" \
+      org.opencontainers.image.description="Sample Node.js service deployed via ArgoCD" \
+      org.opencontainers.image.source="https://github.com/1bugo2/sample-nodejs" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.licenses="ISC"
+
 # PID 1 does not get default signal handling: the kernel only delivers a signal to it if
 # the process installed a handler. app.js installs none, so as PID 1 node discards
 # SIGTERM - `docker stop` measurably took the full 10s timeout and ended in SIGKILL, and

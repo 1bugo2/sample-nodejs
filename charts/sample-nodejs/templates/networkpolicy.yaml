@@ -1,0 +1,62 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sample-nodejs.fullname" . }}
+  labels:
+    {{- include "sample-nodejs.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sample-nodejs.selectorLabels" . | nindent 6 }}
+  # Naming a policyType with no matching rule is what makes it default-deny.
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # The ingress controller, which should be the only thing reaching the app directly.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - port: http
+          protocol: TCP
+
+    # Prometheus, for the /metrics endpoint that is intentionally not exposed via Ingress.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - port: http
+          protocol: TCP
+
+    # Kubelet probes come from the node's host network namespace, so they match no
+    # namespaceSelector. Whether they are filtered at all is CNI-specific: on this k3s
+    # cluster they are not, so no allowance is required. Set extraIngressCIDRs to the NODE
+    # CIDR on a CNI that does filter them - never 0.0.0.0/0, which would allow everything
+    # and reduce this policy to decoration.
+    {{- range .Values.networkPolicy.extraIngressCIDRs }}
+    - from:
+        - ipBlock:
+            cidr: {{ . | quote }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- end }}
+
+  egress:
+    # DNS only. The app makes no outbound calls of its own, so nothing else is allowed -
+    # which also means a compromised container cannot reach out to fetch a payload.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+{{- end }}

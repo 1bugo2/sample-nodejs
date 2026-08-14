@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "sample-nodejs.fullname" . }}-test
+  labels:
+    {{- include "sample-nodejs.labels" . | nindent 4 }}
+  annotations:
+    # Run only on `helm test`, not on install. Deleted afterwards regardless of outcome,
+    # so a failed run does not leave a stray Pod behind for someone to puzzle over.
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  # Same hardening as the app: a test pod is still a pod, and one running as root with a
+  # writable filesystem is a gap in exactly the place nobody looks.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      # Asserts the deployment contract through the Service, i.e. via the same path real
+      # traffic takes, rather than by exec-ing into a pod. Verifies both probe endpoints,
+      # the route the Ingress serves, and that /metrics is exposing the counter.
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          BASE="http://{{ include "sample-nodejs.fullname" . }}:{{ .Values.service.port }}"
+
+          echo "GET /live"
+          curl -fsS "$BASE/live" | grep -qx 'Alive'
+
+          echo "GET /ready"
+          curl -fsS "$BASE/ready" | grep -qx 'Ready'
+
+          echo "GET /my-app"
+          curl -fsS "$BASE/my-app" | grep -qx 'Hello, World!'
+
+          echo "GET /metrics exposes the counter"
+          curl -fsS "$BASE/metrics" | grep -q '^root_access_total '
+
+          echo "all checks passed"

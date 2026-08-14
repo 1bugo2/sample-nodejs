@@ -1,0 +1,265 @@
+name: Release
+
+# Runs only after a PR has merged into protected main, so everything here has already
+# passed the PR gate (secrets, SAST, dependencies, image build + smoke test + scan,
+# chart lint). This workflow publishes; it does not re-litigate whether the change is safe.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never cancel a release mid-flight. Cancelling between "image pushed" and "digest
+# promoted" would leave the registry and the GitOps repo disagreeing about what is current.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CHART_PATH: charts/sample-nodejs
+  GITOPS_REPO: 1bugo2/sample-nodejs-gitops
+  GITOPS_VALUES: envs/dev/values.yaml
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      # Create the tag and the GitHub Release.
+      contents: write
+      # Push the image and the chart to GHCR.
+      packages: write
+      # Cosign keyless signing exchanges this OIDC token for a certificate, which is what
+      # removes the need for a long-lived signing key stored as a secret.
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # Full history and tags: the version bump is derived from the commits since the
+          # last tag, so a shallow clone would compute the wrong bump.
+          fetch-depth: 0
+
+      - name: Derive version from Conventional Commits
+        id: version
+        # Git tags are the source of truth for the released version, not package.json -
+        # that belongs to the upstream fixture and is not ours to bump.
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --quiet
+          last=$(git tag -l 'v*' --sort=-v:refname | head -n1 || true)
+
+          if [ -z "$last" ]; then
+            version="1.0.0"; bump="initial"
+          else
+            log=$(git log --format='%s%n%b' "${last}..HEAD")
+            # A "!" after the type, or a BREAKING CHANGE trailer, means major.
+            if printf '%s\n' "$log" | grep -qE '^BREAKING[ -]CHANGE' \
+               || printf '%s\n' "$log" | grep -qE '^[a-z]+(\([^)]*\))?!:'; then
+              bump=major
+            elif printf '%s\n' "$log" | grep -qE '^feat(\([^)]*\))?:'; then
+              bump=minor
+            else
+              # Anything else is a patch. Deliberately not "no release": every merge to
+              # main produces a traceable artifact, which keeps the registry and the tag
+              # history in step with the branch.
+              bump=patch
+            fi
+            v=${last#v}
+            major=${v%%.*}; rest=${v#*.}; minor=${rest%%.*}; patch=${rest#*.}
+            case "$bump" in
+              major) major=$((major+1)); minor=0; patch=0 ;;
+              minor) minor=$((minor+1)); patch=0 ;;
+              patch) patch=$((patch+1)) ;;
+            esac
+            version="${major}.${minor}.${patch}"
+          fi
+
+          echo "previous=${last:-none}" >> "$GITHUB_OUTPUT"
+          echo "bump=$bump"            >> "$GITHUB_OUTPUT"
+          echo "version=$version"      >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release \`v$version\`"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| previous tag | \`${last:-none}\` |"
+            echo "| bump | \`$bump\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # The built-in token is enough for GHCR with packages: write - no PAT needed.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        # Loaded into the local daemon, NOT pushed. The scan below has to pass first, and
+        # pushing afterwards from the same local image guarantees the bits that were
+        # scanned are exactly the bits that get published.
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 8099:8080 "$IMAGE"
+          trap 'docker logs smoke || true; docker rm -f smoke >/dev/null 2>&1 || true' EXIT
+          curl -fsS --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://127.0.0.1:8099/live
+          curl -fsS -o /dev/null http://127.0.0.1:8099/ready
+          test "$(curl -fsS http://127.0.0.1:8099/my-app)" = "Hello, World!"
+          curl -fsS http://127.0.0.1:8099/metrics | grep -q '^root_access_total '
+          echo "endpoints the chart depends on all respond"
+
+      - name: Block release on high or critical vulnerabilities
+        # The gate that matters. It runs BEFORE the push, so a vulnerable image is never
+        # published rather than published and then reported.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ steps.version.outputs.version }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Push image
+        id: push
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          VERSION: v${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:$VERSION"
+          docker push "$IMAGE:sha-${{ github.sha }}"
+          # The digest is the deployable identity. Everything downstream - signing, the
+          # SBOM, and the GitOps promotion - refers to this rather than to a tag.
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:$VERSION" | cut -d'@' -f2)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "pushed $IMAGE@$digest"
+
+      - name: Install cosign and syft
+        run: |
+          set -euo pipefail
+          sudo curl -fsSL -o /usr/local/bin/cosign \
+            https://github.com/sigstore/cosign/releases/download/v2.4.3/cosign-linux-amd64
+          sudo chmod +x /usr/local/bin/cosign
+          curl -fsSL -o syft.tar.gz \
+            https://github.com/anchore/syft/releases/download/v1.19.0/syft_1.19.0_linux_amd64.tar.gz
+          tar -xzf syft.tar.gz syft && sudo mv syft /usr/local/bin/ && rm syft.tar.gz
+          cosign version --json >/dev/null && echo "cosign ok"
+          syft version | head -1
+
+      - name: Generate SBOM
+        env:
+          REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+        run: |
+          # By digest, so the SBOM describes the exact artifact that was pushed.
+          syft "$REF" -o spdx-json=sbom.spdx.json -q
+          echo "SBOM packages: $(jq '.packages | length' sbom.spdx.json)"
+
+      - name: Sign image and attest the SBOM
+        env:
+          REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Keyless: the signature is bound to this workflow's OIDC identity, so there is
+          # no private signing key to store, rotate or leak.
+          cosign sign --yes "$REF"
+          cosign attest --yes --predicate sbom.spdx.json --type spdxjson "$REF"
+
+      - name: Package and push the Helm chart as an OCI artifact
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Chart version and appVersion move together: the chart is versioned with the
+          # application it deploys, and both are released from this commit.
+          helm package "$CHART_PATH" --version "$VERSION" --app-version "$VERSION" -d dist/
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          helm push "dist/sample-nodejs-${VERSION}.tgz" "oci://${REGISTRY}/${{ github.repository_owner }}/charts"
+
+      - name: Tag and create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push origin "v$VERSION"
+          # --generate-notes builds the changelog from the merged PRs, so the Conventional
+          # Commit subjects become the release notes without a separate changelog file.
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --generate-notes \
+            --notes-start-tag "${{ steps.version.outputs.previous }}" \
+            sbom.spdx.json \
+            || gh release create "v$VERSION" --title "v$VERSION" --generate-notes sbom.spdx.json
+
+      - name: Promote to the GitOps repository
+        env:
+          DEPLOY_KEY: ${{ secrets.GITOPS_DEPLOY_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # A deploy key scoped to the GitOps repo alone. This is the pipeline's entire
+          # deploy authority: it can write a version into one file in one repository. It
+          # holds no kubeconfig and cannot reach the cluster, which is unroutable from here.
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.6/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+          git clone --depth 1 "git@github.com:${GITOPS_REPO}.git" gitops
+          cd gitops
+
+          yq -i ".image.digest = \"${DIGEST}\"" "$GITOPS_VALUES"
+          yq -i ".image.tag = \"v${VERSION}\"" "$GITOPS_VALUES"
+
+          if git diff --quiet; then
+            echo "digest unchanged - nothing to promote"
+            exit 0
+          fi
+
+          git -c user.name='sample-nodejs release' \
+              -c user.email='noamya7312@gmail.com' \
+              commit -am "deploy(dev): sample-nodejs v${VERSION}"
+          git push
+          echo "promoted v${VERSION} (${DIGEST}) to ${GITOPS_REPO}/${GITOPS_VALUES}"
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "| image | \`${REGISTRY}/${IMAGE_NAME}:v${VERSION}\` |"
+            echo "| digest | \`${DIGEST}\` |"
+            echo "| chart | \`oci://${REGISTRY}/${{ github.repository_owner }}/charts/sample-nodejs:${VERSION}\` |"
+            echo "| signed | cosign keyless + SBOM attestation |"
+            echo "| promoted to | \`${GITOPS_REPO}\` → ArgoCD |"
+          } >> "$GITHUB_STEP_SUMMARY"

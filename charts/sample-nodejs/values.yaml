@@ -1,0 +1,199 @@
+# Default values for sample-nodejs.
+#
+# Design rule: this chart must `helm install` cleanly on any conformant cluster. Anything
+# that depends on a specific CNI, on optional CRDs, or on credentials that only exist in
+# one environment is present but DISABLED by default, with a comment explaining why.
+# Environment-specific overrides live in the GitOps repository, not here.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/1bugo2/sample-nodejs
+  # Overwritten per release by the pipeline, which writes an immutable digest rather than
+  # a tag. A tag can be repointed at different content; a digest cannot, so what was
+  # scanned is provably what runs.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Empty by default on purpose. The release registry is private, so the real deployment
+# needs a pull credential - but defaulting to a Secret name that does not exist anywhere
+# else would make a fresh `helm install` fail with ImagePullBackOff. The GitOps values
+# supply it; see the README for creating it.
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  # Nothing in this app talks to the Kubernetes API, so it has no reason to carry a
+  # mounted token. Suppressing it removes a credential an attacker could otherwise use.
+  automountServiceAccountToken: false
+
+# Non-sensitive configuration, rendered into a ConfigMap and injected via envFrom.
+config:
+  PORT: "8080"
+  NODE_ENV: "production"
+
+# Sensitive environment variables, rendered into a Secret and injected via envFrom.
+#
+# Empty by default because this application genuinely has no secrets. The mechanism is
+# wired and working rather than demonstrated with an invented credential - the only real
+# secret in this system is the registry pull token referenced by imagePullSecrets above.
+secretEnv: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  # Named so the Service can be repointed at a different container port without editing
+  # every probe and the Ingress.
+  targetPort: http
+
+ingress:
+  enabled: true
+  # Override for a cluster that is not running Traefik. The Ingress is simply ignored by
+  # a controller that does not match this class.
+  className: traefik
+  # nip.io resolves *.<dashed-ip>.nip.io to that IP, which avoids editing /etc/hosts on
+  # every machine that wants to reach the demo. Override for any other cluster.
+  host: my-app.192-168-56-101.nip.io
+  annotations: {}
+  tls:
+    enabled: false
+
+  # An allow-list, not a deny-list. Only these paths are routed, so anything else is
+  # refused by the ingress controller and never reaches a pod.
+  #
+  # This matters for two endpoints the sample app exposes:
+  #   /classified  returns "You should not be here!!!" to any caller. The app is a
+  #                supplied fixture and is not being modified, so it is simply not routed.
+  #   /metrics     scraped in-cluster by Prometheus; publishing it externally would leak
+  #                request volumes and process internals for no benefit.
+  #
+  # Plain Ingress paths rather than a Traefik Middleware, so this works on any ingress
+  # controller. Exposing a new route requires a chart change, which for an allow-list is
+  # the intended behaviour.
+  paths:
+    - path: /my-app
+      pathType: Prefix
+    - path: /about
+      pathType: Prefix
+
+# Sized from measurement, not guesswork: the container idles at ~20MiB and reaches ~35MiB
+# after 1000 requests.
+resources:
+  requests:
+    # 100m gives the HorizontalPodAutoscaler a sane denominator - it scales on percentage
+    # of request, so an unrealistically low request makes the target meaningless.
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    # Without a memory limit one leaking pod can evict its neighbours. 192Mi is ~5x the
+    # measured peak: it bounds a runaway without OOM-killing normal operation.
+    memory: 192Mi
+    # A CPU limit throttles rather than kills, which surfaces as latency. Set high enough
+    # never to bite in normal use while still capping a runaway loop.
+    cpu: 500m
+
+autoscaling:
+  # Requires metrics-server. Without it the HPA reports <unknown> and simply does nothing,
+  # so this is safe to leave on.
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+    scaleDown:
+      # Far longer than scaleUp: shedding replicas while traffic is still arriving causes
+      # the outage autoscaling exists to prevent, and a short window makes the replica
+      # count oscillate on bursty traffic.
+      stabilizationWindowSeconds: 300
+
+podDisruptionBudget:
+  enabled: true
+  # maxUnavailable rather than minAvailable. minAvailable: 1 with a single replica forbids
+  # every voluntary eviction, which silently blocks node drains and cluster upgrades
+  # forever. maxUnavailable: 1 always permits exactly one, whatever the replica count.
+  maxUnavailable: 1
+
+# Probes target endpoints the application already exposes.
+probes:
+  # Gates liveness: until this succeeds the liveness probe is not evaluated, so a slow
+  # cold start can never be mistaken for a hung process and restart-looped.
+  startup:
+    path: /live
+    periodSeconds: 2
+    failureThreshold: 30
+  readiness:
+    path: /ready
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  liveness:
+    path: /live
+    periodSeconds: 10
+    timeoutSeconds: 2
+    # 3 failures at 10s means ~30s genuinely wedged before a restart. Tighter than that
+    # restarts pods over transient hiccups.
+    failureThreshold: 3
+
+# tini in the image forwards SIGTERM, so node exits almost instantly. Good for rollout
+# speed, but it leaves no drain window: the kubelet removes the pod from Service endpoints
+# and signals it at the same moment, so requests already in flight would be dropped. This
+# sleep runs BEFORE SIGTERM, holding the pod open while it is de-registered.
+lifecycle:
+  preStopSleepSeconds: 5
+# Must exceed preStopSleepSeconds plus time to finish in-flight work, or the kubelet
+# SIGKILLs mid-request.
+terminationGracePeriodSeconds: 30
+
+podSecurityContext:
+  runAsNonRoot: true
+  # Numeric, matching the Dockerfile's USER. Kubernetes cannot resolve a username from an
+  # image, so runAsNonRoot alone would not be enforceable without this.
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  # Verified safe: `docker diff` on a running container is empty, so the app writes
+  # nothing to its own filesystem.
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+networkPolicy:
+  # OFF by default, deliberately: enforcement is CNI-dependent, and on a CNI that filters
+  # kubelet traffic this blocks the readiness and liveness probes and kills every pod -
+  # the most common way a NetworkPolicy takes down the workload it was meant to protect.
+  # Enabled in the GitOps values for this cluster, where it was verified end to end:
+  # probes kept passing with 0 restarts, a pod in another namespace was refused, and
+  # Ingress traffic still returned 200. Confirm the same before enabling elsewhere.
+  enabled: false
+  ingressControllerNamespace: kube-system
+  monitoringNamespace: monitoring
+  # Only needed on a CNI that filters kubelet probe traffic. Must be the node CIDR -
+  # 0.0.0.0/0 would allow everything and make the policy pointless.
+  extraIngressCIDRs: []
+
+metrics:
+  serviceMonitor:
+    # OFF by default: requires the Prometheus Operator CRDs, and a chart that fails to
+    # install on a cluster without them is a bad default. The app serves /metrics either
+    # way. Enabled in the GitOps values where Prometheus is present.
+    enabled: false
+    interval: 30s
+    path: /metrics
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+# Keeps two old ReplicaSets for rollback without accumulating dozens.
+revisionHistoryLimit: 2

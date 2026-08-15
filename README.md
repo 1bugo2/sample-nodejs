@@ -217,14 +217,16 @@ Trivy HIGH/CRITICAL: 0 · hadolint clean at info threshold · stops in 0.15s
 
 ## The Helm chart
 
-`charts/sample-nodejs/`. The brief asked to *"maximize the use of Kubernetes manifest
-features"* and, in the same breath, for a chart *"so we can easily deploy it"*. Those pull
-against each other, so the chart is built on one rule:
+`charts/sample-nodejs/`. Built for the stack in [Prerequisites](#prerequisites--the-stack-this-is-built-for),
+on one rule:
 
-> **Feature-rich, but `helm install` works first try on any conformant cluster.** Anything
-> that depends on a specific CNI, on optional CRDs, or on credentials that exist in only one
-> place ships **present but disabled**, with a comment explaining why. It is enabled
-> per-cluster from the GitOps values.
+> **A default `helm install` must succeed before the cluster is finished being built.**
+> Anything requiring CRDs, a policy-enforcing CNI, or a registry credential ships present but
+> **disabled**, and is switched on per-environment from the GitOps values once those
+> dependencies exist.
+
+That is bootstrap ordering, not hedging about unknown clusters — the app chart legitimately
+gets installed before the monitoring stack does.
 
 | Template | Default | Notes |
 |---|---|---|
@@ -666,33 +668,25 @@ confirming probes kept passing with 0 restarts while a pod in another namespace 
 
 ## Running it yourself
 
-### The honest caveat
-
-**You cannot pull the image.** It is in a private registry, which is what the task asked for, and a
-credential cannot be shipped in a public repo. Kubernetes has no way to acquire credentials it was
-not given — so there are two options:
-
-**Use the evidence.** [`docs/evidence/`](docs/evidence/) has the screenshots and captured output.
-This is what the brief means by *"access to your cluster **or** screenshots"*.
-
-**Or build the image yourself.** The chart is public and fully parameterised, and defaults to *no*
-`imagePullSecrets` specifically so it installs cleanly against someone else's registry:
+**The image is private**, as the task requires, so you cannot pull it — a credential cannot
+be shipped in a public repo, and Kubernetes has no way to acquire one it was not given. Either
+use [`docs/evidence/`](docs/evidence/), which is what the brief means by *"access to your
+cluster **or** screenshots"*, or build the image and point the chart at your own registry:
 
 ```bash
 docker build -t <your-registry>/sample-nodejs:1.0.0 .
 docker push  <your-registry>/sample-nodejs:1.0.0
 
-helm install app oci://ghcr.io/1bugo2/charts/sample-nodejs --version 1.0.4 \
+helm install app oci://ghcr.io/1bugo2/charts/sample-nodejs --version 1.1.0 \
   --namespace sample-nodejs --create-namespace \
   --set image.repository=<your-registry>/sample-nodejs \
   --set image.tag=1.0.0 \
-  --set ingress.host=<your-hostname> \
-  --set ingress.className=nginx
+  --set ingress.host=<your-hostname>
 
 helm test app -n sample-nodejs
 ```
 
-No credential needed, because you are pulling your own image.
+The chart itself is public, so no credential is needed to fetch it.
 
 ### Rebuilding the cluster from scratch
 

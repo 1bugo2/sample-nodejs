@@ -36,6 +36,11 @@ updates:
     commit-message:
       prefix: "fix(deps)"
       prefix-development: "chore(deps)"
+    # Inert while version updates are disabled above - cooldown does not apply to security
+    # updates, which should arrive immediately. It is declared anyway so that re-enabling
+    # version updates cannot accidentally do so without a cooldown in place.
+    cooldown:
+      default-days: 7
 
   # ---------------------------------------------------------------------------------
   # Docker base image - SECURITY UPDATES ONLY, same reasoning.
@@ -51,6 +56,11 @@ updates:
     open-pull-requests-limit: 0
     commit-message:
       prefix: "fix(docker)"
+    # Inert while version updates are disabled above - cooldown does not apply to security
+    # updates, which should arrive immediately. It is declared anyway so that re-enabling
+    # version updates cannot accidentally do so without a cooldown in place.
+    cooldown:
+      default-days: 7
 
   # ---------------------------------------------------------------------------------
   # GitHub Actions - VERSION UPDATES ON. The one ecosystem that needs them.

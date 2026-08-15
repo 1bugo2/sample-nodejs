@@ -106,3 +106,63 @@ kubelet         ──pull───►  GHCR (image)       (outbound from cluste
 ```
 
 Nothing points *into* the cluster.
+
+---
+
+## The container image
+
+Two-stage build on `node:22-alpine`, pinned by digest. The first stage runs
+`npm ci --omit=dev`; the second copies only `node_modules`, `package.json` and `app.js`.
+
+### Four things in it are load-bearing
+
+**1. The base image is not clean, and the fix is to delete things.**
+
+`node:22-alpine` ships HIGH and CRITICAL CVEs — `tar` (CRITICAL), `brace-expansion`,
+`ip-address`, `sigstore`, `picomatch`. All of them come from the dependency trees bundled
+with the **`npm` and `corepack` CLIs**, not from Alpine and not from this app. Our own image
+gate would have blocked our own image.
+
+None of that is needed at runtime — dependencies were already resolved in the build stage —
+so the runtime stage deletes `npm`, `corepack` and `yarn`. Trivy then exits 0 on
+HIGH/CRITICAL. The CVEs are *gone*, not suppressed in a `.trivyignore`, and a package
+manager is a useful thing for an attacker to find in a container.
+
+**2. `tini` at PID 1, because `SIGTERM` was being silently discarded.**
+
+PID 1 does not get default signal handling — the kernel only delivers a signal to it if the
+process installed a handler. `app.js` installs none, so as PID 1 node **ignored `SIGTERM`
+entirely**. Measured: `docker stop` took the full **10.1s** timeout and ended in `SIGKILL`.
+In Kubernetes that means every pod deletion burns the whole grace period.
+
+With `tini` as PID 1 forwarding the signal to node as an ordinary child process:
+**0.15s**. Fixed in the image, so no application code changed.
+
+**3. `USER 1000:1000`, numerically.**
+
+Not `USER node`, though they are the same account. Kubernetes evaluates `runAsNonRoot`
+against the numeric id and cannot resolve a username from an image — a named `USER` would
+leave the pod failing to start under `runAsNonRoot: true` unless `runAsUser` were also set.
+
+**4. Exec form throughout.**
+
+`ENTRYPOINT ["/sbin/tini", "--"]` with `CMD ["node", "app.js"]`. Shell form would insert
+`/bin/sh` between tini and node, and it does not forward signals either — undoing fix #2.
+
+### Also
+
+- **`.dockerignore` excludes `.git`**, which otherwise carries the entire history into the
+  build context, including any secret ever committed and later "removed"
+- **`HEALTHCHECK`** is present even though Kubernetes ignores it, because it makes
+  `docker run` and the CI smoke test self-verifying
+- **OCI labels** (`image.source`, `image.revision`) make a running container traceable to
+  the commit that built it, and let GitHub link the package to this repo. Trade-off recorded
+  in the Dockerfile: since `revision` changes every commit, two builds of identical code no
+  longer share a digest. Traceability was judged worth more than digest stability
+
+### Result
+
+```
+245MB · no package managers · runs as uid 1000 · read-only root filesystem
+Trivy HIGH/CRITICAL: 0 · hadolint clean at info threshold · stops in 0.15s
+```

@@ -1,9 +1,12 @@
 # Default values for sample-nodejs.
 #
-# Design rule: this chart must `helm install` cleanly on any conformant cluster. Anything
-# that depends on a specific CNI, on optional CRDs, or on credentials that only exist in
-# one environment is present but DISABLED by default, with a comment explaining why.
-# Environment-specific overrides live in the GitOps repository, not here.
+# Built for a known stack - Traefik, Prometheus Operator, a private OCI registry, ArgoCD.
+# See the repository README for the full prerequisite list.
+#
+# Design rule: a default `helm install` must succeed before the cluster is finished being
+# built. Anything requiring CRDs, a policy-enforcing CNI, or a registry credential is
+# present but DISABLED here, and switched on per-environment from the GitOps values once
+# those dependencies exist. That is bootstrap ordering, not portability hedging.
 
 replicaCount: 2
 

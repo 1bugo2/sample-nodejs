@@ -166,3 +166,109 @@ leave the pod failing to start under `runAsNonRoot: true` unless `runAsUser` wer
 245MB · no package managers · runs as uid 1000 · read-only root filesystem
 Trivy HIGH/CRITICAL: 0 · hadolint clean at info threshold · stops in 0.15s
 ```
+
+---
+
+## The Helm chart
+
+`charts/sample-nodejs/`. The brief asked to *"maximize the use of Kubernetes manifest
+features"* and, in the same breath, for a chart *"so we can easily deploy it"*. Those pull
+against each other, so the chart is built on one rule:
+
+> **Feature-rich, but `helm install` works first try on any conformant cluster.** Anything
+> that depends on a specific CNI, on optional CRDs, or on credentials that exist in only one
+> place ships **present but disabled**, with a comment explaining why. It is enabled
+> per-cluster from the GitOps values.
+
+| Template | Default | Notes |
+|---|---|---|
+| `deployment.yaml` | on | 3 probes, resources, securityContext, `preStop`, config checksum |
+| `service.yaml` | on | targets a *named* port so the container port can move |
+| `ingress.yaml` | on | path **allow-list** — see below |
+| `configmap.yaml` | on | `PORT`, `NODE_ENV` via `envFrom` |
+| `secret.yaml` | on, empty | wired to `envFrom`; empty because the app has no secrets |
+| `serviceaccount.yaml` | on | `automountServiceAccountToken: false` |
+| `hpa.yaml` | on | degrades to `<unknown>` without metrics-server, so safe to leave on |
+| `pdb.yaml` | on | `maxUnavailable`, not `minAvailable` — see below |
+| `networkpolicy.yaml` | **off** | enforcement is CNI-specific |
+| `servicemonitor.yaml` | **off** | needs Prometheus Operator CRDs |
+| `values.schema.json` | — | rejects bad values at install time |
+| `tests/test-connection.yaml` | — | a real `helm test` hook |
+
+### Three probes, three different jobs
+
+People often wire all three to the same endpoint with the same timings, which wastes them.
+
+```yaml
+startupProbe:    /live   every 2s,  30 failures allowed
+readinessProbe:  /ready  every 5s,  3 failures
+livenessProbe:   /live   every 10s, 3 failures
+```
+
+`startupProbe` **gates liveness** — until it succeeds, liveness is not evaluated at all, so a
+slow cold start can never be mistaken for a hung process and restart-looped.
+`readinessProbe` controls Service membership only. `livenessProbe` is the destructive one and
+deliberately checks nothing downstream: a liveness probe that fails during a database outage
+restarts every replica and turns a partial outage into a total one.
+
+### The Ingress is an allow-list, not a deny-list
+
+The app serves `/classified` to anyone. It is a supplied fixture and was not modified — so
+the path is simply **never routed**:
+
+```yaml
+paths:
+  - { path: /my-app, pathType: Prefix }
+  - { path: /about,  pathType: Prefix }
+```
+
+Anything else gets a 404 from the ingress controller and **never reaches a pod**. Verified:
+`/classified`, `/metrics`, `/live`, `/ready` and `/` all return 404 from outside, while
+`/my-app` returns `Hello, World!`.
+
+`/metrics` is excluded for the same reason — it is scraped in-cluster, and publishing it
+externally leaks request volumes and process internals for no benefit.
+
+Plain Ingress paths rather than a Traefik `Middleware`, so this works on any ingress
+controller. The cost is that exposing a new route needs a chart change, which for an
+allow-list is the intended behaviour.
+
+### `preStop`, and why it is needed *because* of `tini`
+
+Fixing `SIGTERM` created a second, subtler problem. Node now exits almost instantly — but the
+kubelet removes a pod from Service endpoints and signals it **at the same moment**, so
+requests already in flight would be cut off.
+
+```yaml
+lifecycle:
+  preStop:
+    exec: { command: ["/bin/sh", "-c", "sleep 5"] }
+terminationGracePeriodSeconds: 30
+```
+
+`preStop` runs **before** `SIGTERM`, holding the pod open while it is de-registered. This is
+also why the base image is alpine rather than distroless: `preStop exec` needs a shell.
+
+### `maxUnavailable`, not `minAvailable`
+
+```yaml
+podDisruptionBudget:
+  maxUnavailable: 1
+```
+
+`minAvailable: 1` looks equivalent and is a trap: with a single replica it forbids *every*
+voluntary eviction, silently blocking node drains and cluster upgrades forever.
+`maxUnavailable: 1` always permits exactly one, whatever the replica count.
+
+### Resources sized from measurement
+
+```
+idle:               ~20 MiB
+after 1000 requests: ~35 MiB
+→ requests: 64Mi / 100m CPU     limits: 192Mi / 500m CPU
+```
+
+The CPU request is not arbitrary — the HPA scales on *percentage of request*, so an
+unrealistically low request makes the 70% target meaningless. The memory limit is ~5× the
+measured peak: enough to bound a leak without OOM-killing normal operation. `docker diff` on
+a running container is empty, which is what makes `readOnlyRootFilesystem: true` safe.

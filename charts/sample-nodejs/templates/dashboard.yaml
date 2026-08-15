@@ -1,0 +1,179 @@
+{{- if .Values.metrics.dashboard.enabled }}
+{{- /* Hoisted so the JSON below never needs escaped quotes inside a template action:
+       Go template parsing happens before YAML/JSON, and \" is a parse error there. */}}
+{{- $fullname := include "sample-nodejs.fullname" . -}}
+{{- $ns := .Release.Namespace -}}
+{{- $container := .Chart.Name -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-dashboard
+  labels:
+    {{- include "sample-nodejs.labels" . | nindent 4 }}
+    # Grafana's sidecar watches for this label and imports the dashboard. Shipping it as a
+    # ConfigMap keeps it in version control and reviewable, instead of hand-built in the UI
+    # and lost the next time Grafana is reinstalled.
+    {{ .Values.metrics.dashboard.label }}: "1"
+data:
+  sample-nodejs.json: |
+    {
+      "title": "sample-nodejs",
+      "uid": "sample-nodejs",
+      "tags": ["sample-nodejs"],
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "templating": { "list": [] },
+      "panels": [
+        {
+          "type": "row",
+          "title": "Traffic and errors (measured at the ingress)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Requests per second by status code",
+          "description": "From Traefik, not the app - the app does not instrument HTTP status codes. Counts only requests that reached the Service; paths refused by the Ingress allow-list never appear here.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "sum by (code) (rate(traefik_service_requests_total{service=~\".*{{ $fullname }}.*\"}[5m]))",
+              "legendFormat": "{{ `{{code}}` }}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Latency percentiles",
+          "description": "p50 / p95 / p99 from Traefik's duration histogram.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{service=~\".*{{ $fullname }}.*\"}[5m])))",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{service=~\".*{{ $fullname }}.*\"}[5m])))",
+              "legendFormat": "p95",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{service=~\".*{{ $fullname }}.*\"}[5m])))",
+              "legendFormat": "p99",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "type": "row",
+          "title": "Node.js runtime",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Event loop lag",
+          "description": "The most important panel here. Node is single-threaded, so a blocked event loop means the process is alive but doing no work - and a liveness probe will not notice. Alert fires above 200ms.",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 10 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "red", "value": 0.2 }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "max by (pod) (nodejs_eventloop_lag_seconds{namespace=\"{{ $ns }}\"})",
+              "legendFormat": "{{ `{{pod}}` }}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Heap used",
+          "description": "A steadily rising floor across restarts is the shape of a leak.",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 10 },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "sum by (pod) (nodejs_heap_size_used_bytes{namespace=\"{{ $ns }}\"})",
+              "legendFormat": "{{ `{{pod}}` }}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "root_access_total rate",
+          "description": "The application's own counter, incremented on /my-app. The only business metric the app exposes.",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 10 },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "sum(rate(root_access_total{namespace=\"{{ $ns }}\"}[5m]))",
+              "legendFormat": "/my-app",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "row",
+          "title": "Kubernetes",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Replicas: desired vs available vs HPA ceiling",
+          "description": "Available touching zero means the Service has no endpoints. Current sitting on the ceiling means autoscaling has run out of room.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+          "targets": [
+            {
+              "expr": "kube_deployment_status_replicas_available{namespace=\"{{ $ns }}\", deployment=\"{{ $fullname }}\"}",
+              "legendFormat": "available",
+              "refId": "A"
+            },
+            {
+              "expr": "kube_deployment_spec_replicas{namespace=\"{{ $ns }}\", deployment=\"{{ $fullname }}\"}",
+              "legendFormat": "desired",
+              "refId": "B"
+            },
+            {
+              "expr": "kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"{{ $ns }}\", horizontalpodautoscaler=\"{{ $fullname }}\"}",
+              "legendFormat": "hpa ceiling",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Memory used vs limit",
+          "description": "The limit line is what the chart sets. Alert fires at 80% of it, before the OOMKill rather than after.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "max by (pod) (container_memory_working_set_bytes{namespace=\"{{ $ns }}\", container=\"{{ $container }}\"})",
+              "legendFormat": "{{ `{{pod}}` }}",
+              "refId": "A"
+            },
+            {
+              "expr": "max(kube_pod_container_resource_limits{namespace=\"{{ $ns }}\", container=\"{{ $container }}\", resource=\"memory\"})",
+              "legendFormat": "limit",
+              "refId": "B"
+            }
+          ]
+        }
+      ]
+    }
+{{- end }}

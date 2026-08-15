@@ -272,3 +272,125 @@ The CPU request is not arbitrary — the HPA scales on *percentage of request*, 
 unrealistically low request makes the 70% target meaningless. The memory limit is ~5× the
 measured peak: enough to bound a leak without OOM-killing normal operation. `docker diff` on
 a running container is empty, which is what makes `readOnlyRootFilesystem: true` safe.
+
+---
+
+## The pipelines
+
+Two workflows, with clearly different jobs. **PR validation decides whether a change is
+safe. Release publishes it.** The release workflow does not re-litigate safety, because
+nothing reaches `main` without passing the gate.
+
+### Git workflow
+
+GitHub Flow: short-lived branch → PR → required checks → **rebase-merge** into protected
+`main`.
+
+Rebase rather than squash, deliberately: it preserves the individual commits so the reasoning
+in each message survives on `main`, while keeping history linear. Squashing would collapse a
+PR into one commit and paste the PR description into the commit body — which is how PR prose
+ends up polluting `git log`.
+
+`main` is protected with:
+
+```
+required status check : "PR gate"   (strict — branch must be current)
+enforce_admins        : true        ← applies to the repository owner too
+required_linear_history: true
+allow_force_pushes    : false
+```
+
+`enforce_admins` matters. A gate an administrator can walk past is a suggestion. This one was
+tested by trying to merge a vulnerable PR as the owner — see
+[What the pipeline caught](#what-the-pipeline-caught).
+
+### PR validation — 5 jobs, one required check
+
+```
+secret-scan  ──┐
+sast         ──┤
+dependency   ──┼──►  PR gate  ──►  merge allowed
+image        ──┤
+chart        ──┘
+```
+
+| Job | Tool | Blocks on |
+|---|---|---|
+| Secret scan | Gitleaks, `fetch-depth: 0` | **any** finding |
+| SAST | Semgrep (`p/javascript`, `p/nodejs`, `p/owasp-top-ten`, `p/secrets`) | severity `ERROR` |
+| Dependency scan | Trivy fs + `npm audit` | `HIGH`/`CRITICAL` |
+| Image | hadolint → build → smoke test → Trivy image | `HIGH`/`CRITICAL` |
+| Chart | `helm lint --strict` → kubeconform → Checkov | invalid manifests |
+
+Three details that are choices rather than defaults:
+
+**Reporting is separated from gating.** Every scan uploads SARIF to the Security tab with
+`if: always()`, and a *separate* step decides pass/fail. A gate that exits before publishing
+its own evidence is useless precisely when you need it — while triaging the failure.
+
+**`PR gate` is a single aggregate check.** Adding a scan later is a `needs:` entry, not a
+repository settings change. Branch protection references one context and never needs touching.
+
+**Secrets scan the full history.** A credential committed and "removed" in a later commit is
+still in the history, still leaked, and still needs rotating.
+
+### Thresholds, and why they are not all the same
+
+| Gate | Threshold | Reasoning |
+|---|---|---|
+| Secrets | any finding | there is no acceptable number of committed credentials |
+| SAST | `ERROR` only | `WARNING`/`INFO` land in the Security tab for triage without blocking unrelated work |
+| Dependencies | `HIGH`+, **`ignore-unfixed`** | an advisory with no released patch cannot be actioned by a version bump; blocking on it only teaches people to route around the gate |
+| hadolint | advisory | style rules should not be indistinguishable from a critical CVE |
+| Checkov | advisory | see below |
+
+**Checkov is advisory on purpose.** Its OSS checks carry no severity, and it applies
+Deployment rules to any Pod — it demanded readiness and liveness probes on the one-shot
+`helm test` pod, which is meaningless. Gating on that pushes people to bulk-skip checks, which
+is worse than triaging a report. Its two *genuine* findings were fixed, not suppressed: the
+test pod was mounting a ServiceAccount token, and its image was pinned by tag rather than
+digest.
+
+### Release — on merge to `main`
+
+```
+1. version    from Conventional Commits since the last tag
+2. build      into the local daemon — NOT pushed
+3. smoke test /live /ready /my-app /metrics, plus stop-time under 5s
+4. TRIVY GATE ◄────────── the whole point of the ordering
+5. push       to private GHCR, by digest
+6. SBOM       syft → SPDX, attached to the release
+7. sign       cosign keyless + SBOM attestation
+8. chart      packaged and pushed as an OCI artifact
+9. tag        git tag + GitHub release with generated notes
+10. promote   digest + chart version committed to the GitOps repo
+```
+
+**Steps 2–5 are the important sequence.** The image is built into the local daemon, scanned,
+and only then pushed *from that same local image*. A HIGH or CRITICAL image is therefore never
+published — as opposed to published and then flagged. It also means the bits that were scanned
+are provably the bits that shipped.
+
+Step 3 exists because **`docker build` succeeds even when the app is completely broken** —
+building never runs it. Without a smoke test, a broken app produces a clean scan, a successful
+push, and a `CrashLoopBackOff` in the cluster, with every pipeline step green. It also asserts
+stop-time under 5s, which is a regression guard for the `tini` fix.
+
+**Versions come from git tags, not `package.json`** — that file belongs to the upstream fixture
+and is not ours to bump. `feat:` → minor, `!` or `BREAKING CHANGE` → major, anything else →
+patch.
+
+**Docs-only merges skip the release entirely** via `paths-ignore`. That is a deny-list rather
+than an allow-list on purpose: with `paths:` you enumerate what triggers a release, so a file
+you forget to list means a real change ships nothing and nobody notices. With `paths-ignore:`
+the worst case is one redundant release. For a release gate, failing towards "published
+something unnecessary" beats failing towards "silently published nothing". `charts/**` is
+deliberately *not* ignored — a probe-timing change needs a new chart version even though the
+image is unchanged.
+
+**`concurrency: cancel-in-progress: false`.** Cancelling between "image pushed" and "digest
+promoted" would leave the registry and the GitOps repo disagreeing about what is current.
+
+**Every action is pinned to a commit SHA.** A tag is a mutable pointer; anyone who can push to
+`actions/checkout` could repoint `v5` at code that reads our secrets. Dependabot is configured
+for the `github-actions` ecosystem to bump the pins.

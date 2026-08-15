@@ -19,6 +19,52 @@ caveat, that is stated rather than omitted.
 
 ---
 
+## Prerequisites — the stack this is built for
+
+This is built for a specific stack rather than for every possible cluster. Real
+infrastructure targets a known platform; a chart that tries to work everywhere is optimised
+for nowhere, and every portability flag is a code path nobody exercises.
+
+| Component | Requirement | Why |
+|---|---|---|
+| Kubernetes | **≥ 1.25** | `autoscaling/v2`, `policy/v1` |
+| Ingress controller | **Traefik** | k3s default. Also the source of the RED metrics, since the app instruments no request duration or status codes |
+| Metrics | **metrics-server** | the HPA scales on CPU as a percentage of request |
+| Monitoring | **Prometheus Operator CRDs** | for `ServiceMonitor` and `PrometheusRule` |
+| Registry | **OCI, private** | GHCR. The cluster needs an `imagePullSecret` |
+| GitOps | **ArgoCD ≥ 2.6** | multi-source `Application`s (`$values` refs) |
+| CNI | one that **enforces NetworkPolicy** | k3s does; not all do |
+
+`scripts/bootstrap-vm.sh` in the [GitOps repo](https://github.com/1bugo2/sample-nodejs-gitops)
+builds all of that from a bare Ubuntu host.
+
+### Where that stack shows through
+
+Two places the chart is genuinely Traefik-specific, worth knowing before deploying behind a
+different controller:
+
+- **`SampleNodejsHighErrorRate`** queries `traefik_service_requests_total`. Behind nginx that
+  metric does not exist, so the alert never fires — silent rather than broken, which is
+  worse. Swap it for the equivalent nginx metric.
+- **Two dashboard panels** (request rate, latency percentiles) read the same Traefik
+  histograms and would render empty.
+
+### Why some templates ship disabled
+
+`networkPolicy`, `metrics.serviceMonitor`, `metrics.prometheusRule` and `metrics.dashboard`
+default to `false`. That is **not** about supporting unknown clusters — it is about
+**bootstrap ordering**.
+
+The app chart can legitimately be installed before the monitoring stack exists. If
+`serviceMonitor` defaulted on, `helm install` would hard-fail with
+`no matches for kind "ServiceMonitor"` on a cluster that is perfectly correct and simply not
+finished being built. Same for `NetworkPolicy` before the CNI's policy controller is running.
+
+They are switched on per-environment from the GitOps values, where the dependencies are known
+to be present.
+
+---
+
 ## The application
 
 Unchanged from upstream apart from one forced dependency bump (see

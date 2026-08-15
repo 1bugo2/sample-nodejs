@@ -394,3 +394,105 @@ promoted" would leave the registry and the GitOps repo disagreeing about what is
 **Every action is pinned to a commit SHA.** A tag is a mutable pointer; anyone who can push to
 `actions/checkout` could repoint `v5` at code that reads our secrets. Dependabot is configured
 for the `github-actions` ecosystem to bump the pins.
+
+---
+
+## Decisions, and why
+
+### Deployment, not StatefulSet
+
+The brief asks for this one explicitly.
+
+**A `Deployment`.** The application holds no state:
+
+- **It writes nothing to disk.** `docker diff` on a running container is empty — which is also
+  what makes `readOnlyRootFilesystem: true` viable
+- **No replica needs a stable identity.** Nothing addresses a specific pod; any replica can
+  serve any request
+- **No persistent volume.** There is nothing to attach
+
+A `StatefulSet` would buy stable network identities (`app-0`, `app-1`), ordered
+rollout and per-replica `PersistentVolumeClaim`s. None of those are used here, and each has a
+cost: rollouts become sequential rather than surging, scaling down is ordered and slower, and
+deleting the workload leaves PVCs behind on purpose.
+
+Put plainly: a StatefulSet would make this deployment slower and more fragile in exchange for
+guarantees the app does not need. If it grew a local cache it wanted to survive a restart, or
+became a clustered database with peer discovery, that calculation would change.
+
+### A separate GitOps repository
+
+The brief offers a choice — a dedicated GitOps repo, or ArgoCD reading the app repo directly —
+and asks which and why. **Separate repo.** Four reasons:
+
+**1. CI never holds a cluster credential.** This is the big one. The pipeline's whole deploy
+authority is a deploy key that can write to one repository. There is no kubeconfig in GitHub
+Actions and no inbound path to the cluster. If the app repo's CI were compromised tomorrow, the
+attacker could publish a bad image and propose a bad version — but they could not `kubectl` into
+anything.
+
+**2. No CI recursion.** If the pipeline committed the version bump back into the repo it builds
+from, that commit retriggers the pipeline. Avoiding it needs `[skip ci]` markers or path filters,
+both of which are easy to get subtly wrong and silently break.
+
+**3. Deployment history is separate from code history.** `git log` in the GitOps repo *is* the
+deploy log — who deployed what, when, with the digest. `git revert` is the rollback, and it does
+not revert application source at the same time.
+
+**4. Least privilege scales.** Adding a second environment or a second cluster is an access-control
+change in the GitOps repo, not in the repository developers push to daily.
+
+**The costs, honestly:** two repos to keep in step, and a deploy is not atomic with its merge —
+there is a gap between merging and ArgoCD syncing. Both are acceptable. The credential separation
+is not something a single repo can give you.
+
+### Private image, public chart
+
+The brief requires the *image* in a private registry. The **image is private** (an anonymous pull
+gets `403`); the **chart is public** (`200`).
+
+That split is deliberate. The artifact containing code is private. The artifact *describing how to
+deploy it* is readable — which means ArgoCD needs no registry credential for the chart, and a
+reviewer can inspect or install the chart against their own registry without being handed a
+credential. It directly serves the brief's other request: *"so we can easily deploy it"*.
+
+### Digest, not tag
+
+The GitOps repo pins `image.digest`, and the chart's image helper prefers digest over tag. A tag
+is a mutable pointer — `:v1.0.0` can be repushed with different content, so what Trivy scanned
+would not provably be what runs. A digest cannot move. Signing and the SBOM reference the digest
+too.
+
+Verified: the deployment spec, both running pods, and the GitOps commit all carry the same
+`sha256:…`.
+
+### ArgoCD is installed by a script, not self-managed
+
+ArgoCD could manage itself through the app-of-apps, and it is a common pattern. It is installed by
+[`scripts/bootstrap-vm.sh`](https://github.com/1bugo2/sample-nodejs-gitops/blob/main/scripts/bootstrap-vm.sh)
+in the GitOps repo instead.
+
+Reason: if ArgoCD breaks itself, you can no longer use ArgoCD to fix it. A script is the more
+robust recovery path. This is not theoretical — the ArgoCD instance that was on this VM
+*before* this exercise was self-managed, and was sitting in `Unknown` sync state when I found
+it. What the app-of-apps *does* manage is the `AppProject`, the chart repository registration
+and the environment `Application`s.
+
+### The app itself was left alone
+
+`app.js` is byte-identical to upstream. The only change to `package.json` is the Express bump that
+a HIGH CVE forced.
+
+Where a problem *looked* like it needed an application change, it was solved at the layer that
+actually owns it:
+
+| Problem | Application fix I did not make | Infrastructure fix I made |
+|---|---|---|
+| `SIGTERM` discarded | add a signal handler | `tini` at PID 1 |
+| Traffic to a terminating pod | readiness gating in code | `preStop` + `maxUnavailable: 0` |
+| `/classified` is public | remove the route | Ingress path allow-list |
+| Missing security headers | add `helmet` | *not fixed* — noted below |
+
+That last row is the honest one. The app sends no security headers, and adding `helmet` would be a
+one-line improvement — but it is application work, not infrastructure work, so it is recorded here
+as a recommendation rather than done silently.

@@ -496,3 +496,98 @@ actually owns it:
 That last row is the honest one. The app sends no security headers, and adding `helmet` would be a
 one-line improvement — but it is application work, not infrastructure work, so it is recorded here
 as a recommendation rather than done silently.
+
+---
+
+## What the pipeline caught
+
+Seven real problems surfaced while building this. Three were in the supplied app or its base
+image, three were in **my own** pipeline, and one was an external service. None were found by
+reading the code — each came from running the thing and looking at what happened.
+
+### 1. A HIGH CVE in the app's dependencies
+
+The dependency gate failed on its **very first run**:
+
+```
+path-to-regexp  0.1.12  →  fixed in 0.1.13
+CVE-2026-4867  HIGH
+ReDoS via catastrophic backtracking from malformed URL parameters
+```
+
+Pulled in transitively by Express 4.21.2. Fixed by raising the Express floor to `^4.22.2` —
+bumping the *range*, not just refreshing the lockfile, because the lockfile alone leaves the
+manifest claiming 4.21.2 is acceptable and anyone regenerating it reintroduces the CVE.
+
+### 2. My own workflow used mutable action tags
+
+Semgrep flagged `github-actions-mutable-action-tag` **on the PR that introduced the SAST job**,
+which is a reasonable advertisement for the gate. Every action is now pinned to a commit SHA.
+
+### 3. My own Dependabot config had no cooldown
+
+Also flagged by SAST. A bot that upgrades the moment a version appears turns someone else's
+stolen publish token into our running container as fast as possible. Compromised npm packages are
+usually yanked within days, so there is now a 7-day cooldown. Security advisories bypass it, so
+real CVE fixes still arrive immediately.
+
+### 4. `SIGTERM` was being silently discarded
+
+The one I would not have predicted. PID 1 gets no default signal handling — the kernel only
+delivers a signal to it if the process installed a handler, and `app.js` installs none.
+
+```
+before (node as PID 1):   docker stop → 10.1s, ended in SIGKILL
+after  (tini as PID 1):   docker stop → 0.15s
+```
+
+Found by *timing* `docker stop` in the smoke test rather than assuming exec-form `CMD` was
+sufficient. The CI smoke test now asserts stop-time under 5s so it cannot regress.
+
+### 5. The base image ships CRITICAL CVEs
+
+`node:22-alpine` carries HIGH and CRITICAL findings — all from the dependency trees bundled with
+the `npm` and `corepack` CLIs, none from Alpine or this app. Our own image gate blocked our own
+image. Resolved by deleting the package managers from the runtime stage, which clears the CVEs
+legitimately rather than suppressing them.
+
+### 6. The pipeline promoted the image but never the chart version
+
+The worst of the seven, because it was **silent**.
+
+The release published chart `1.0.1` to GHCR while the ArgoCD `Application` still tracked `1.0.0`.
+A change to a probe timing, a resource limit or a `securityContext` would have been built,
+scanned, signed, pushed — **and then ignored by the cluster, with a green pipeline the whole way.**
+
+It only surfaced by accident. `v1.0.1` came from a docs-only change, and its image digest came out
+**byte-identical** to `v1.0.0` — `.dockerignore` excludes `*.md`, so nothing entering the build had
+changed. That is reproducible builds working correctly, but it left nothing to roll back between,
+and chasing *why* exposed the missing chart promotion.
+
+Fixed in [PR #10](https://github.com/1bugo2/sample-nodejs/pull/10); verified by watching chart
+`1.0.4` propagate through the app-of-apps into the cluster.
+
+### 7. Keyless signing has no retry, and Sigstore had a bad minute
+
+A release failed with:
+
+```
+Post "https://fulcio.sigstore.dev/api/v1/signingCert": connection reset by peer
+```
+
+Nothing wrong on our side — but keyless signing puts two external public services (Fulcio for the
+certificate, Rekor for the transparency log) directly in the release path with no retry, so a
+network blip anywhere fails an otherwise good release. Now retries with exponential backoff, and
+deliberately still **blocking** rather than best-effort: a release that claims to be signed should
+be signed.
+
+The failure mode was at least safe — the image was pushed but nothing was tagged, released or
+promoted, so the cluster stayed on the previous digest rather than ending up half-updated.
+
+### And one thing I got wrong about my own gate
+
+The first version of the NetworkPolicy included `ipBlock: 0.0.0.0/0` to stop kubelet probes being
+blocked. That would have allowed ingress from *anywhere*, reducing the policy to decoration. I
+caught it before committing, removed it, and **tested instead of guessing** — on this k3s cluster
+kubelet probes are not filtered, so no allowance is needed. Verified by enabling the policy and
+confirming probes kept passing with 0 restarts while a pod in another namespace was refused.

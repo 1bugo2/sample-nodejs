@@ -463,8 +463,8 @@ is a mutable pointer — `:v1.0.0` can be repushed with different content, so wh
 would not provably be what runs. A digest cannot move. Signing and the SBOM reference the digest
 too.
 
-Verified: the deployment spec, both running pods, and the GitOps commit all carry the same
-`sha256:…`.
+Verified in [digest-and-registry-proof.txt](docs/evidence/digest-and-registry-proof.txt): the
+deployment spec, both running pods, and the GitOps commit all carry the same `sha256:…`.
 
 ### ArgoCD is installed by a script, not self-managed
 
@@ -674,7 +674,8 @@ git push
 ```
 
 ArgoCD syncs the previous digest. No `kubectl`, no `helm rollback`, and the rollback is itself a
-reviewable commit. Verified zero-downtime — requests returned `200` throughout.
+reviewable commit. Verified zero-downtime — requests returned `200` throughout, captured in
+[gitops-rollback.md](docs/evidence/gitops-rollback.md).
 
 ---
 

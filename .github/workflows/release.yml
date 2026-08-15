@@ -198,10 +198,32 @@ jobs:
           REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
-          # Keyless: the signature is bound to this workflow's OIDC identity, so there is
-          # no private signing key to store, rotate or leak.
-          cosign sign --yes "$REF"
-          cosign attest --yes --predicate sbom.spdx.json --type spdxjson "$REF"
+
+          # Keyless signing depends on two public Sigstore services - Fulcio for the
+          # short-lived certificate and Rekor for the transparency log. That puts an
+          # external dependency in the release path, and a release once failed here on
+          # "connection reset by peer" from fulcio.sigstore.dev with nothing wrong on our
+          # side. Retry with backoff so a network blip does not fail an otherwise good
+          # release.
+          #
+          # Still blocking rather than best-effort: a release that claims to be signed
+          # should be signed. Retrying makes it resilient, not optional.
+          retry() {
+            local attempt=1 max=4 delay=15
+            until "$@"; do
+              if [ "$attempt" -ge "$max" ]; then
+                echo "::error::'$*' failed after $max attempts"
+                return 1
+              fi
+              echo "attempt $attempt failed, retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+
+          retry cosign sign --yes "$REF"
+          retry cosign attest --yes --predicate sbom.spdx.json --type spdxjson "$REF"
 
       - name: Package and push the Helm chart as an OCI artifact
         env:

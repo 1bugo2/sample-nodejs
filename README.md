@@ -591,3 +591,130 @@ blocked. That would have allowed ingress from *anywhere*, reducing the policy to
 caught it before committing, removed it, and **tested instead of guessing** — on this k3s cluster
 kubelet probes are not filtered, so no allowance is needed. Verified by enabling the policy and
 confirming probes kept passing with 0 restarts while a pod in another namespace was refused.
+
+---
+
+## Requirement traceability
+
+| Requirement | Where | Evidence |
+|---|---|---|
+| Fork the sample app | this repo | — |
+| Helm chart for easy deployment | [`charts/sample-nodejs/`](charts/sample-nodejs/) | `helm lint --strict` clean, kubeconform valid, `helm test` exits 0 |
+| Deployment or StatefulSet, **with reasoning** | [Decisions](#deployment-not-statefulset) | — |
+| Readiness and liveness probes | `deployment.yaml` — plus a `startupProbe` | [05](docs/evidence/screenshots/05-argocd-resource-tree.png) |
+| Service and Ingress | `service.yaml`, `ingress.yaml` | [01](docs/evidence/screenshots/01-ingress-my-app.png), [03](docs/evidence/screenshots/03-ingress-classified-404.png) |
+| Resource limits and requests | sized from measurement | [hpa-autoscaling.md](docs/evidence/hpa-autoscaling.md) |
+| Other configs (secrets, configmaps…) | ConfigMap, Secret, ServiceAccount, HPA, PDB, NetworkPolicy, ServiceMonitor, values schema, `helm test` | [05](docs/evidence/screenshots/05-argocd-resource-tree.png) |
+| **Version bumping / git workflow** | SemVer from Conventional Commits → tag; GitHub Flow, protected `main` | [09](docs/evidence/screenshots/09-github-release-v1.0.0.png) |
+| **SAST, fail on critical** | Semgrep, gates on `ERROR` | caught mutable action tags + missing cooldown |
+| **Image scan, block on high** | Trivy **before** the push | [07](docs/evidence/screenshots/07-release-pipeline-steps.png), [security-gate-blocks-merge.md](docs/evidence/security-gate-blocks-merge.md) |
+| Bonus tooling | Gitleaks, `npm audit`, hadolint, kubeconform, Checkov, Dependabot + cooldown, SBOM, cosign, SHA-pinned actions | — |
+| Build and dockerize | multi-stage `Dockerfile`, buildx | [Container image](#the-container-image) |
+| **Push to a private registry** | private GHCR | [08](docs/evidence/screenshots/08-ghcr-image-private.png), anonymous pull → `403` |
+| **Deploy to Kubernetes via the pipeline** | pipeline commits the digest; ArgoCD reconciles | [04](docs/evidence/screenshots/04-argocd-applications-synced.png) |
+| **ArgoCD + GitOps, with reasoning** | [Decisions](#a-separate-gitops-repository) | [06](docs/evidence/screenshots/06-argocd-application-manifest.png) |
+| App deployed successfully | `Synced / Healthy` | [01](docs/evidence/screenshots/01-ingress-my-app.png) |
+| Repo links + screenshots | [`docs/evidence/`](docs/evidence/) | — |
+
+---
+
+## Running it yourself
+
+### The honest caveat
+
+**You cannot pull the image.** It is in a private registry, which is what the task asked for, and a
+credential cannot be shipped in a public repo. Kubernetes has no way to acquire credentials it was
+not given — so there are two options:
+
+**Use the evidence.** [`docs/evidence/`](docs/evidence/) has the screenshots and captured output.
+This is what the brief means by *"access to your cluster **or** screenshots"*.
+
+**Or build the image yourself.** The chart is public and fully parameterised, and defaults to *no*
+`imagePullSecrets` specifically so it installs cleanly against someone else's registry:
+
+```bash
+docker build -t <your-registry>/sample-nodejs:1.0.0 .
+docker push  <your-registry>/sample-nodejs:1.0.0
+
+helm install app oci://ghcr.io/1bugo2/charts/sample-nodejs --version 1.0.4 \
+  --namespace sample-nodejs --create-namespace \
+  --set image.repository=<your-registry>/sample-nodejs \
+  --set image.tag=1.0.0 \
+  --set ingress.host=<your-hostname> \
+  --set ingress.className=nginx
+
+helm test app -n sample-nodejs
+```
+
+No credential needed, because you are pulling your own image.
+
+### Rebuilding the cluster from scratch
+
+```bash
+git clone https://github.com/1bugo2/sample-nodejs-gitops.git && cd sample-nodejs-gitops
+./scripts/bootstrap-vm.sh          # k3s + Traefik + metrics-server + ArgoCD, idempotent
+
+kubectl create namespace sample-nodejs
+kubectl -n sample-nodejs create secret docker-registry ghcr-pull \
+  --docker-server=ghcr.io --docker-username=<user> --docker-password=<read:packages token>
+
+kubectl apply -f bootstrap/root-app.yaml   # the only manual apply; everything else follows
+```
+
+That script exists because a host restore wiped this VM mid-exercise and none of the original setup
+had been recorded. Rebuilding it by hand cost an afternoon; the script does it in about eight
+minutes. Setup that only exists in someone's shell history is not reproducible.
+
+### Rolling back
+
+```bash
+cd sample-nodejs-gitops
+git revert <the deploy commit>
+git push
+```
+
+ArgoCD syncs the previous digest. No `kubectl`, no `helm rollback`, and the rollback is itself a
+reviewable commit. Verified zero-downtime — requests returned `200` throughout.
+
+---
+
+## Known gaps
+
+Things a reviewer would reasonably ask about, stated rather than hidden.
+
+**No test stage.** The app shipped npm's default `test` placeholder (`exit 1`) and no tests. The
+brief does not require a test stage, and I chose not to author application tests for an
+infrastructure exercise rather than add a stub that asserts nothing. The pipeline instead verifies
+the *artifact* — the image is started and its endpoints are asserted before it can be published.
+
+**No TLS.** The Ingress serves plain HTTP. The chart supports `ingress.tls.enabled`, but there is no
+resolvable public DNS name for this VM, so cert-manager could not complete an ACME challenge. A
+self-signed certificate would prove nothing.
+
+**No security headers.** The app sends none. `helmet` would fix it in one line, but that is
+application work — recorded as a recommendation instead.
+
+**Single node.** No real topology spread, no multi-node failure testing, and the PDB can only be
+demonstrated rather than exercised against a genuine drain.
+
+**Single environment.** Only `dev`. The layout supports adding `staging`/`prod` as sibling
+directories, but promotion between environments is not implemented.
+
+**The pull secret holds a broader token than it should.** It should be scoped to `read:packages`
+only. It is a throwaway lab credential and will be revoked, but least privilege is the correct
+answer and this is not it.
+
+---
+
+## Evidence
+
+[`docs/evidence/`](docs/evidence/) — 9 screenshots and 4 captured-output documents, indexed with
+what each one shows.
+
+Live things that can be checked without any access to the cluster:
+
+- [**PR #8**](https://github.com/1bugo2/sample-nodejs/pull/8) — deliberately left open and failing.
+  `PR gate` is red and GitHub refuses the merge
+- [**Actions history**](https://github.com/1bugo2/sample-nodejs/actions) — every PR run and release
+- [**GitOps commit log**](https://github.com/1bugo2/sample-nodejs-gitops/commits/main) — the deploy
+  history, including the revert

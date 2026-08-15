@@ -24,14 +24,14 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Gitleaks scans commit history, not just the working tree: a secret that was
           # committed and then "removed" in a later commit is still leaked.
           fetch-depth: 0
 
       - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Fail the job on any finding. There is no acceptable number of committed secrets.
@@ -45,7 +45,7 @@ jobs:
       # Required to publish findings to the repository's Security > Code scanning tab.
       security-events: write
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Semgrep is installed via pipx rather than run as a `container:` job. The official
       # image is Alpine/musl based, and GitHub's JavaScript actions (upload-sarif) inject a
@@ -70,7 +70,7 @@ jobs:
         # findings always get uploaded even when the gate is going to fail.
 
       - name: Upload findings to code scanning
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v3
         # Upload even on a failing gate, but only if the scan got far enough to write a
         # report - otherwise a failed build adds a misleading "path does not exist" error.
         if: always() && hashFiles('semgrep.sarif') != ''
@@ -100,7 +100,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Same report-then-gate split as the SAST job. It is also the safe pattern here:
       # trivy-action does not reliably honour exit-code while rendering the SARIF
@@ -117,7 +117,7 @@ jobs:
           # the unfixed and low-severity findings the gate below deliberately tolerates.
 
       - name: Upload findings to code scanning
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v3
         # Upload even on a failing gate, but only if the scan got far enough to write a
         # report - otherwise a failed build adds a misleading "path does not exist" error.
         if: always() && hashFiles('trivy-fs.sarif') != ''
@@ -156,10 +156,10 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Lint Dockerfile
-        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
         with:
           dockerfile: Dockerfile
           # Advisory rather than blocking: hadolint's style rules are opinionated, and a
@@ -170,12 +170,12 @@ jobs:
       # docker-container driver, which supports both `cache-to: type=gha` and loading the
       # result into the local daemon so the smoke test can run it.
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Build image
         # Deliberately built and NOT pushed. Nothing reaches a registry from a pull
         # request; the release workflow on main is the only thing that publishes.
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: false
@@ -233,7 +233,7 @@ jobs:
           output: trivy-image.sarif
 
       - name: Upload findings to code scanning
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v3
         # Upload even on a failing gate, but only if the scan got far enough to write a
         # report - otherwise a failed build adds a misleading "path does not exist" error.
         if: always() && hashFiles('trivy-image.sarif') != ''
@@ -266,7 +266,7 @@ jobs:
     env:
       CHART: charts/sample-nodejs
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: helm lint
         # --strict promotes lint warnings to errors. Also exercises values.schema.json,
@@ -311,7 +311,7 @@ jobs:
         run: checkov -d "$CHART" --framework helm --compact --quiet --soft-fail -o sarif --output-file-path .
 
       - name: Upload Checkov findings to code scanning
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v3
         if: always() && hashFiles('results.sarif') != ''
         with:
           sarif_file: results.sarif

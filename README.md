@@ -809,8 +809,27 @@ the *artifact* — the image is started and its endpoints are asserted before it
 resolvable public DNS name for this VM, so cert-manager could not complete an ACME challenge. A
 self-signed certificate would prove nothing.
 
-**No security headers.** The app sends none. `helmet` would fix it in one line, but that is
-application work — recorded as a recommendation instead.
+**No security headers, and no WAF — deliberately, not as an oversight.** The app sends no
+`X-Content-Type-Options`, `X-Frame-Options`, CSP or `Referrer-Policy`, and stock Express
+advertises `X-Powered-By: Express`. A baseline DAST scan would flag all of that.
+
+Those are **edge concerns, and this cluster is not the edge.** In production the chain is
+CDN/WAF → load balancer → ingress → app, and response headers, TLS termination, rate
+limiting, bot protection and OWASP rule sets belong at that first hop — owned by whoever owns
+the edge, applied once for every service behind it.
+
+Implementing them at the cluster ingress instead would put them at the wrong layer, duplicate
+what the edge already owns, and couple the chart to one ingress controller. So the honest
+position is that this layer is out of scope for this exercise rather than missing from it.
+
+The consequence to be clear about: **as deployed, behind nothing, this app has no security
+headers.** That is a property of an exercise with no edge tier, not a recommendation.
+
+**No DAST.** All gates are static analysis. DAST tests a *deployed* application, and the
+deployed application is meant to sit behind the edge tier above — so scanning the bare
+container in CI would test a topology that never serves traffic, and report findings that the
+edge layer is responsible for. CI also cannot reach the cluster, which is the point of the
+GitOps isolation rather than a limitation to work around.
 
 **Single node.** No real topology spread, no multi-node failure testing, and the PDB can only be
 demonstrated rather than exercised against a genuine drain.

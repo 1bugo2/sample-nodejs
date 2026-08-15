@@ -6,6 +6,20 @@ name: Release
 on:
   push:
     branches: [main]
+    # A deny-list, not an allow-list, and that choice is deliberate. With `paths:` you
+    # enumerate what triggers a release, so a new file you forget to list means a real
+    # change ships nothing and nobody notices. With `paths-ignore:` the worst case is one
+    # unnecessary release. For a release gate, failing towards "published something
+    # redundant" is far safer than failing towards "silently published nothing".
+    #
+    # charts/** is deliberately NOT ignored: the chart lives in this repo, so a change to a
+    # probe timing or a resource limit needs a new chart version published even though it
+    # does not alter the image.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".github/pull_request_template.md"
   workflow_dispatch:
 
 # Never cancel a release mid-flight. Cancelling between "image pushed" and "digest
@@ -63,9 +77,9 @@ jobs:
             elif printf '%s\n' "$log" | grep -qE '^feat(\([^)]*\))?:'; then
               bump=minor
             else
-              # Anything else is a patch. Deliberately not "no release": every merge to
-              # main produces a traceable artifact, which keeps the registry and the tag
-              # history in step with the branch.
+              # Anything else is a patch. Docs-only merges never reach this workflow at
+              # all - see paths-ignore above - so a version bump here always corresponds to
+              # a change in something deployable.
               bump=patch
             fi
             v=${last#v}

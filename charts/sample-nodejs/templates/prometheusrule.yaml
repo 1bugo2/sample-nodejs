@@ -1,0 +1,129 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "sample-nodejs.fullname" . }}
+  labels:
+    {{- include "sample-nodejs.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: {{ include "sample-nodejs.fullname" . }}
+      rules:
+
+        # Not "pod restarted" - pods restart for legitimate reasons. Repeated restarts in a
+        # short window is the signal, because that is a crash loop rather than a rollout.
+        - alert: SampleNodejsCrashLooping
+          expr: |
+            sum by (pod) (
+              increase(kube_pod_container_status_restarts_total{
+                namespace="{{ .Release.Namespace }}", container="{{ .Chart.Name }}"
+              }[15m])
+            ) > 2
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ `{{ $labels.pod }}` }} has restarted more than twice in 15 minutes"
+            description: >-
+              Repeated restarts usually mean a failing liveness probe, an OOMKill, or a
+              crash on startup. Check `kubectl logs --previous`.
+
+        # The most important alert here, and the one most people miss for Node.
+        #
+        # Node is single-threaded: if the event loop is blocked, the process is alive but
+        # doing no work. It will still answer a liveness probe if the probe's timeout is
+        # generous, so /live returning 200 proves nothing. Lag is what catches it.
+        - alert: SampleNodejsEventLoopBlocked
+          expr: |
+            max by (pod) (
+              nodejs_eventloop_lag_seconds{namespace="{{ .Release.Namespace }}"}
+            ) > {{ .Values.metrics.prometheusRule.eventLoopLagSeconds }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ `{{ $labels.pod }}` }} event loop lag is {{ `{{ $value | humanizeDuration }}` }}"
+            description: >-
+              The process is alive but not processing work promptly. Liveness probes will
+              not catch this. Usually a synchronous operation blocking the loop.
+
+        # Fires before the OOMKill rather than after it, so there is time to act.
+        - alert: SampleNodejsMemoryNearLimit
+          expr: |
+            max by (pod) (
+              container_memory_working_set_bytes{
+                namespace="{{ .Release.Namespace }}", container="{{ .Chart.Name }}"
+              }
+            )
+            /
+            max by (pod) (
+              kube_pod_container_resource_limits{
+                namespace="{{ .Release.Namespace }}", container="{{ .Chart.Name }}", resource="memory"
+              }
+            ) > 0.8
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ `{{ $labels.pod }}` }} is using over 80% of its memory limit"
+            description: >-
+              Approaching the limit set in the chart. Either a leak, or the limit is now
+              too small for real traffic.
+
+        # Error rate measured at the ingress, not in the app, because the app does not
+        # instrument HTTP status codes. This is what a user actually experiences.
+        - alert: SampleNodejsHighErrorRate
+          expr: |
+            sum(rate(traefik_service_requests_total{
+              service=~".*{{ include "sample-nodejs.fullname" . }}.*", code=~"5.."
+            }[5m]))
+            /
+            sum(rate(traefik_service_requests_total{
+              service=~".*{{ include "sample-nodejs.fullname" . }}.*"
+            }[5m])) > 0.01
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Over 1% of requests are returning 5xx"
+            description: >-
+              Measured at Traefik. Note this counts only requests that reached the
+              Service - paths refused by the Ingress allow-list never appear here.
+
+        # Not an error, but it means autoscaling has run out of room: the ceiling is now
+        # the bottleneck rather than a safety net.
+        - alert: SampleNodejsAutoscalerAtCeiling
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{
+              namespace="{{ .Release.Namespace }}",
+              horizontalpodautoscaler="{{ include "sample-nodejs.fullname" . }}"
+            }
+            >=
+            kube_horizontalpodautoscaler_spec_max_replicas{
+              namespace="{{ .Release.Namespace }}",
+              horizontalpodautoscaler="{{ include "sample-nodejs.fullname" . }}"
+            }
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "HPA has been pinned at maxReplicas for 10 minutes"
+            description: >-
+              Sustained demand above the configured ceiling. Raise maxReplicas or find out
+              why each replica is doing less work than expected.
+
+        - alert: SampleNodejsNoReadyReplicas
+          expr: |
+            kube_deployment_status_replicas_available{
+              namespace="{{ .Release.Namespace }}",
+              deployment="{{ include "sample-nodejs.fullname" . }}"
+            } == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No ready replicas - the service is down"
+            description: >-
+              Every replica is failing its readiness probe, so the Service has no
+              endpoints and the Ingress has nowhere to send traffic.
+{{- end }}

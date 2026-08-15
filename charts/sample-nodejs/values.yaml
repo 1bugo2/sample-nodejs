@@ -189,6 +189,22 @@ metrics:
     interval: 30s
     path: /metrics
 
+  prometheusRule:
+    # Alert rules, shipped with the chart so they are versioned alongside the thing they
+    # describe rather than clicked into a UI and lost on the next reinstall. Off by
+    # default for the same CRD reason as the ServiceMonitor.
+    enabled: false
+    # Node is single-threaded, so a blocked event loop means the process is alive but
+    # doing no work - and a liveness probe will not notice. 200ms is well past anything
+    # this app should ever produce; it idles in single-digit milliseconds.
+    eventLoopLagSeconds: 0.2
+
+  dashboard:
+    # Grafana's sidecar imports any ConfigMap carrying the label below, which keeps the
+    # dashboard in Git instead of in someone's browser.
+    enabled: false
+    label: grafana_dashboard
+
 nodeSelector: {}
 tolerations: []
 affinity: {}

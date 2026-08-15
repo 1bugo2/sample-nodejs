@@ -445,6 +445,83 @@ for the `github-actions` ecosystem to bump the pins.
 
 ---
 
+## Monitoring
+
+`kube-prometheus-stack`, installed by the bootstrap script. The interesting part is where the
+metrics come from, because the app does not provide most of them.
+
+### The app instruments almost nothing
+
+`prom-client` gives the Node runtime defaults plus one counter (`root_access_total`). It does
+**not** instrument HTTP request duration or status codes. So of Rate / Errors / Duration, the
+application alone provides a partial Rate.
+
+A dashboard built purely on app metrics would look thorough and tell you nothing during an
+incident.
+
+### So RED comes from Traefik
+
+Traefik sees every request and already exposes per-service counts by status code and duration
+histograms. k3s starts it with `--metrics.prometheus=true` and a named `metrics` port, so a
+`PodMonitor` is enough — no change to Traefik's deployment, which matters because k3s manages
+it through a `HelmChart` CR that would overwrite a manual edit.
+
+```
+traefik_service_requests_total{code="200", service="sample-nodejs-dev-80@kubernetes"} = 45
+histogram_quantile(0.95, …traefik_service_request_duration_seconds_bucket…)           = 0.095
+```
+
+Requests refused by the Ingress allow-list never reach a Service, so they appear in
+`traefik_entrypoint_requests_total` rather than the service metric. Service-level metrics
+therefore measure what the *app* served — which is what you want for an error-rate alert.
+
+### Six alerts, and the one worth arguing for
+
+| Alert | Fires when |
+|---|---|
+| `SampleNodejsCrashLooping` | >2 restarts in 15m |
+| **`SampleNodejsEventLoopBlocked`** | **lag > 200ms for 5m** |
+| `SampleNodejsMemoryNearLimit` | >80% of limit for 10m |
+| `SampleNodejsHighErrorRate` | >1% 5xx for 5m |
+| `SampleNodejsAutoscalerAtCeiling` | at `maxReplicas` for 10m |
+| `SampleNodejsNoReadyReplicas` | 0 available for 2m |
+
+**Event loop lag is the important one.** Node is single-threaded: if the loop is blocked the
+process is alive but doing no work, and it will still answer a liveness probe. `/live`
+returning 200 proves nothing in that state. Lag is the only signal that catches it. Measured
+idle at ~11ms, so 200ms is well clear of normal.
+
+Two of the six (`CrashLooping`, `AutoscalerAtCeiling`) overlap with kube-prometheus-stack's
+own `KubePodCrashLooping` and `KubeHpaMaxedOut`. They are kept because they are scoped to this
+app with tuned thresholds and app-specific annotations, so they read and route differently —
+but they are not novel, and duplicate alerts do mean two pages for one incident.
+
+### The dashboard is a ConfigMap
+
+Grafana's sidecar imports any ConfigMap labelled `grafana_dashboard`, so the dashboard ships
+**with the chart** and is versioned alongside what it describes. A dashboard built in the
+browser is lost the next time Grafana is reinstalled.
+
+### Two fixes needed to make the alerting trustworthy
+
+Alerting that is red on day one is alerting people learn to ignore.
+
+1. **The default rules assume kubeadm.** k3s runs the scheduler, controller-manager, etcd and
+   kube-proxy inside one process, so four default rule groups had nothing to scrape and sat
+   permanently down. Disabled in the values.
+2. **Prometheus was scraping the kubelet over IPv6 and failing.** The node carries a ULA IPv6
+   address the kubelet does not listen on, producing three targets that could never succeed
+   and firing `TargetDown` forever. Fixed with a `keep` relabel on IPv4:
+   `6 targets / 3 down → 3 targets / 0 down`.
+
+Final state: only `Watchdog` firing, which is *supposed* to — it is a dead-man's switch
+proving the pipeline works. If `Watchdog` ever stops firing, the alerting itself is broken.
+
+No receivers are configured. There is nowhere sensible to page in a lab, and a fake Slack
+webhook would be theatre.
+
+---
+
 ## Decisions, and why
 
 ### Deployment, not StatefulSet

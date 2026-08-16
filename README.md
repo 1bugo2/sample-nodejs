@@ -199,8 +199,8 @@ leave the pod failing to start under `runAsNonRoot: true` unless `runAsUser` wer
 
 **4. Exec form throughout.**
 
-`ENTRYPOINT ["/sbin/tini", "--"]` with `CMD ["node", "app.js"]`. Shell form would insert
-`/bin/sh` between tini and node, and it does not forward signals either — undoing fix #2.
+`ENTRYPOINT ["/sbin/tini", "--"]` with `CMD ["node", "app.js"]`. Shell form wraps both in
+`/bin/sh -c` and silently discards `CMD`, so an `args:` override from the chart would do nothing.
 
 ### Also
 

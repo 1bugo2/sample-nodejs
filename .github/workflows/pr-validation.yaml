@@ -102,9 +102,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Same report-then-gate split as the SAST job. It is also the safe pattern here:
-      # trivy-action does not reliably honour exit-code while rendering the SARIF
-      # template, so a scan that both reports and gates can silently pass.
+      # Same report-then-gate split as the SAST job, and here the two passes genuinely need
+      # different flags: the report is unfiltered so the Security tab shows the whole picture,
+      # while the gate applies severity and ignore-unfixed. One invocation cannot do both.
       - name: Trivy filesystem scan (report)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

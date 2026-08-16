@@ -87,7 +87,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD ["/bin/sh", "-c", "wget -qO- \"http://127.0.0.1:${PORT}/live\" || exit 1"]
 
-# tini at PID 1, node as its child. Exec form throughout: shell form would insert
-# /bin/sh between them, which does not forward signals either.
+# tini at PID 1, node as its child. Exec form (JSON array): shell form wraps both in
+# /bin/sh -c and silently discards CMD, so an `args:` override from the chart would do nothing.
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "app.js"]

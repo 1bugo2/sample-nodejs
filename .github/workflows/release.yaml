@@ -36,8 +36,6 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   CHART_PATH: charts/sample-nodejs
   GITOPS_REPO: 1bugo2/sample-nodejs-gitops
-  GITOPS_VALUES: envs/dev/values.yaml
-  GITOPS_APP: argocd/applications/sample-nodejs-dev.yaml
 
 jobs:
   release:
@@ -285,18 +283,32 @@ jobs:
           git clone --depth 1 "git@github.com:${GITOPS_REPO}.git" gitops
           cd gitops
 
-          yq -i ".image.digest = \"${DIGEST}\"" "$GITOPS_VALUES"
-          yq -i ".image.tag = \"v${VERSION}\"" "$GITOPS_VALUES"
+          # Both environments receive the SAME digest. This is a promotion, not a rebuild:
+          # prod gets the identical artifact dev has been running, so what a human approves
+          # in prod is the thing that was actually tested - not a fresh build that merely
+          # came from the same commit.
+          #
+          # Writing prod's desired state here does not deploy it. The prod Application has
+          # no `automated` sync policy, so it sits OutOfSync showing the diff until someone
+          # syncs it. The gate lives in ArgoCD, which means CI needs no cluster credential
+          # and no extra privilege in order for production to be gated at all.
+          for env in dev prod; do
+            values="envs/${env}/values.yaml"
+            app="argocd/applications/sample-nodejs-${env}.yaml"
 
-          # Also advance the chart version the Application tracks. Without this the image
-          # is promoted but the chart is not, so a change to a probe or a resource limit
-          # would be published to the registry and then never actually deployed - the
-          # pipeline would look green while the cluster ignored it.
-          # Selects by chart name because sources is a list: the second entry is the values
-          # ref and has no chart field.
-          VERSION="$VERSION" yq -i \
-            '(.spec.sources[] | select(.chart == "sample-nodejs") | .targetRevision) = strenv(VERSION)' \
-            "$GITOPS_APP"
+            DIGEST="$DIGEST"   yq -i '.image.digest = strenv(DIGEST)'      "$values"
+            VERSION="$VERSION" yq -i '.image.tag = "v" + strenv(VERSION)'  "$values"
+
+            # Advance the chart version too. Without this the image is promoted but the
+            # chart is not, so a change to a probe or a resource limit would be published to
+            # the registry and then never deployed - the pipeline would look green while the
+            # cluster ignored it.
+            # Selected by chart name because `sources` is a list and the second entry is the
+            # values ref, which has no chart field.
+            VERSION="$VERSION" yq -i \
+              '(.spec.sources[] | select(.chart == "sample-nodejs") | .targetRevision) = strenv(VERSION)' \
+              "$app"
+          done
 
           if git diff --quiet; then
             echo "digest unchanged - nothing to promote"
@@ -305,9 +317,9 @@ jobs:
 
           git -c user.name='sample-nodejs release' \
               -c user.email='noamya7312@gmail.com' \
-              commit -am "deploy(dev): sample-nodejs v${VERSION}"
+              commit -am "deploy: sample-nodejs v${VERSION} (prod awaits manual sync)"
           git push
-          echo "promoted v${VERSION} (${DIGEST}) to ${GITOPS_REPO}/${GITOPS_VALUES}"
+          echo "::notice::promoted v${VERSION} (${DIGEST}) - dev syncs automatically, prod awaits approval"
 
       - name: Summary
         env:

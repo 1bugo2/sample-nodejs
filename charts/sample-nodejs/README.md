@@ -38,7 +38,7 @@ Kubernetes: `>=1.25.0-0`
 | containerSecurityContext.readOnlyRootFilesystem | bool | `true` | Read-only root filesystem. Verified safe: `docker diff` on a running container is empty, so the app writes nothing. |
 | image.digest | string | `""` | Image digest, e.g. `sha256:...`. Takes precedence over `tag`, and is what the pipeline writes, so the deployed image is provably the one that was scanned. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
-| image.repository | string | `"ghcr.io/1bugo2/sample-nodejs"` | Image repository. |
+| image.repository | string | `"ghcr.io/1bugo2/sample-nodejs"` | Image repository. Override to deploy from your own registry. |
 | image.tag | string | `""` | Image tag. Written by the release pipeline. Prefer `digest`. |
 | imagePullSecrets | list | `[]` | Pull secrets for a private registry. Empty by default so a fresh install cannot fail on a Secret that does not exist yet. |
 | ingress.annotations | object | `{}` | Extra Ingress annotations. |

@@ -17,7 +17,7 @@
 replicaCount: 2
 
 image:
-  # -- Image repository.
+  # -- Image repository. Override to deploy from your own registry.
   repository: ghcr.io/1bugo2/sample-nodejs
   # Overwritten per release by the pipeline, which writes an immutable digest rather than
   # a tag. A tag can be repointed at different content; a digest cannot, so what was

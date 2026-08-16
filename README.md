@@ -250,6 +250,68 @@ gets installed before the monitoring stack does.
 | `values.schema.json` | — | rejects bad values at install time |
 | `tests/test-connection.yaml` | — | a real `helm test` hook |
 
+### Chart reference, and changing it
+
+[`charts/sample-nodejs/README.md`](charts/sample-nodejs/README.md) is a **generated**
+reference for all 71 values, produced by helm-docs from the `# --` comments in `values.yaml`.
+Do not edit it by hand.
+
+CI regenerates it on every pull request and fails on any difference, so it cannot drift from
+`values.yaml`.
+
+### Regenerating it after changing `values.yaml`
+
+Install helm-docs once:
+
+```bash
+go install github.com/norwoodj/helm-docs/cmd/helm-docs@latest
+```
+
+Or take a release binary from [the releases page](https://github.com/norwoodj/helm-docs/releases)
+and put it on your `PATH` — `helm-docs_<version>_Windows_x86_64.zip` on Windows,
+`helm-docs_<version>_Linux_x86_64.tar.gz` on Linux.
+
+Then, from the repository root, **before committing**:
+
+```bash
+helm-docs --chart-search-root=charts
+git add charts/sample-nodejs/README.md
+```
+
+If CI reports `charts/sample-nodejs/README.md is stale`, that is the fix.
+
+To make it automatic, add a pre-commit hook — same result, and it needs no CI privilege:
+
+```bash
+cat > .git/hooks/pre-commit <<'EOF'
+#!/usr/bin/env sh
+helm-docs --chart-search-root=charts && git add charts/sample-nodejs/README.md
+EOF
+chmod +x .git/hooks/pre-commit
+```
+
+CI deliberately does **not** regenerate and commit this itself. That would need
+`contents: write` on a pull-request workflow, and every workflow here runs `contents: read`
+unless it has a specific reason not to.
+
+### Comment conventions in `values.yaml`
+
+| Prefix | Purpose |
+|---|---|
+| `#` | The reasoning — why the value is what it is. Stays in `values.yaml` |
+| `# --` | One-line summary. This is what reaches the generated table |
+| `# @ignore` | Omits the key from the table |
+
+```yaml
+# Without a memory limit one leaking pod can evict its neighbours. 192Mi is ~5x the
+# measured peak: it bounds a runaway without OOM-killing normal operation.
+# -- Memory limit, ~5x measured peak: bounds a leak without OOM-killing normal use.
+memory: 192Mi
+```
+
+Only the `# --` line reaches the table, so keep it short and put anything needing a paragraph
+above it.
+
 ### Three probes, three different jobs
 
 People often wire all three to the same endpoint with the same timings, which wastes them.

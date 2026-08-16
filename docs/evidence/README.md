@@ -25,6 +25,7 @@ a picture.
 
 | File | Shows |
 |---|---|
+| [promotion-gate.txt](promotion-gate.txt) | Verbatim transcript: the **same digest** in both environment files, prod's `syncPolicy.automated` empty while dev's is populated, the identical image running in both namespaces, and both Ingress hosts serving. Reasoning is in the [README](../../README.md#environments-and-promotion) rather than repeated here |
 | [digest-and-registry-proof.txt](digest-and-registry-proof.txt) | The deployed image digest matches the digest committed to the GitOps repo, and an anonymous client gets **403** on the image while the chart returns **200** |
 | [hpa-autoscaling.md](hpa-autoscaling.md) | 1,077,610 requests, **0 failed**, scaled 2 → 6, then held before scaling back down |
 | [security-gate-blocks-merge.md](security-gate-blocks-merge.md) | A planted HIGH CVE caught by two independent gates; merge refused with **HTTP 405** |

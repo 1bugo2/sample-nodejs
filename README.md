@@ -113,8 +113,9 @@ Port comes from `PORT`, defaulting to 8080.
                                  │  a commit, nothing more
               ┌──────────────────▼──────────────────┐
               │  GITOPS REPO                        │
-              │  envs/dev/values.yaml  ← the digest │
-              │  argocd/applications/  ← chart ver  │
+              │  envs/dev/values.yaml   ← digest    │
+              │  envs/prod/values.yaml  ← SAME      │
+              │  argocd/applications/   ← chart ver │
               └──────────────────┬──────────────────┘
                                  │  ArgoCD polls, outbound only
  ┌───────────────────────────────▼───────────────────────────────────────┐
@@ -122,8 +123,14 @@ Port comes from `PORT`, defaulting to 8080.
  │                                                                       │
  │   ArgoCD ──► helm render ──► Deployment · Service · Ingress · HPA      │
  │                              PDB · NetworkPolicy · ConfigMap · SA      │
- │                                        │                              │
- │   Traefik ──► my-app.192-168-56-101.nip.io/my-app                     │
+ │                              ServiceMonitor · PrometheusRule           │
+ │        │                                                               │
+ │        ├─ dev   auto-sync    ──► my-app.192-168-56-101.nip.io          │
+ │        │                                                               │
+ │        └─ prod  MANUAL sync  ──► my-app-prod.192-168-56-101.nip.io     │
+ │                 ▲                                                      │
+ │                 └─ the gate: same digest, applied only when a human    │
+ │                    syncs. Until then prod sits OutOfSync / Healthy.    │
  └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -522,6 +529,119 @@ webhook would be theatre.
 
 ---
 
+## Environments and promotion
+
+Two environments, `dev` and `prod`, each a namespace in the same cluster with its own values
+file and ArgoCD `Application`.
+
+### Read this before the rest of the section
+
+**`prod` here is a namespace on the same single node as `dev`.** It demonstrates the
+promotion *mechanism*; it is not production isolation, and calling it prod is a convenience.
+Concretely, the two share a node with ArgoCD and the monitoring stack — so a load test in dev
+can starve prod, which is the opposite of what production means. During the HPA
+demonstration, `ab -c 60` scaled dev to six pods on a four-vCPU node.
+
+What production would actually look like is in
+[What production would do differently](#what-production-would-do-differently) below.
+
+### What *is* real: prod receives the same artifact
+
+The release pipeline writes one image digest to both environment files in a single commit:
+
+```
+envs/dev/values.yaml    digest: sha256:eda79dce…
+envs/prod/values.yaml   digest: sha256:eda79dce…   ← identical
+```
+
+This is a **promotion, not a rebuild.** Prod is handed the exact artifact that was scanned,
+signed and exercised in dev — not a fresh build from the same commit that is *assumed*
+equivalent. Two builds of one commit can differ; a digest cannot.
+
+### The gate
+
+The two Applications differ in exactly one respect:
+
+| | `syncPolicy.automated` | Behaviour |
+|---|---|---|
+| dev | `prune: true, selfHeal: true` | applies immediately |
+| **prod** | **absent** | **waits for a human** |
+
+So writing prod's desired state does not deploy it. Prod sits `OutOfSync / Healthy` —
+running the previous version fine, with a pending change — until someone syncs it in the UI
+or runs `argocd app sync sample-nodejs-prod`.
+
+`OutOfSync + Healthy + no automated sync` is the idiomatic ArgoCD expression of "pending
+promotion"; ArgoCD has no literal *Pending* status, and the enum cannot be extended. Because
+that combination looks like a fault to anyone who does not read ArgoCD fluently, the prod
+Application carries a `spec.info` block that states the policy on its own page.
+
+### Why the gate is in ArgoCD rather than in CI
+
+A GitHub Environment with a required reviewer was the alternative, and was rejected:
+
+- **`environment:` protection is job-level**, so gating prod needs a second job — meaning
+  either duplicated promotion logic or a shared script. More machinery for less.
+- **The pipeline's job is to publish desired state.** Whether to apply it to production is a
+  deployment decision, owned by the thing that performs deployments.
+- **CI gains no privilege.** Production is gated without the pipeline holding a cluster
+  credential of any kind.
+
+The trade-off, stated plainly: Git records `v1.2.0` for prod while prod runs the previous
+version. That is not a GitOps violation — Git holds *intent* and ArgoCD surfaces the gap
+rather than hiding it — but "Git equals the cluster" is only strictly true for dev.
+
+### Where the environments genuinely differ
+
+| | dev | prod |
+|---|---|---|
+| Ingress host | `my-app.192-168-56-101.nip.io` | `my-app-prod.192-168-56-101.nip.io` |
+| Replica floor | 2 | 2 |
+| HPA ceiling | 6 | 4 — shares a node, and an unreachable ceiling only produces Pending pods |
+| Scale-down window | 300s | **600s** — shedding prod capacity on a brief lull is the expensive mistake |
+| Grafana dashboard | owned by dev | off — the ConfigMap is keyed on a fixed uid, so two releases would fight over it |
+
+---
+
+## What production would do differently
+
+The gap between this and a real setup, since the honest version of that answer is more
+useful than pretending there isn't one.
+
+**Two ArgoCD instances, not one.** A single instance managing both environments holds prod
+credentials, which makes the dev-facing GitOps controller a production-privileged system —
+so every dev-side convenience becomes a prod risk. Separate instances mean prod credentials
+exist only in prod's instance, a compromise of dev tooling cannot reach prod, and an ArgoCD
+upgrade can be tested in dev first. "Who can sync prod" becomes "who can log into prod
+ArgoCD" rather than a fine-grained `AppProject` RBAC exercise.
+
+**Separate clusters, not namespaces.** Which is what makes the `server:` field in each
+Application meaningful rather than aspirational, and gives prod its own control plane and
+resource budget.
+
+**Promotion as a pull request.** Rather than the pipeline committing prod's digest and a
+human syncing afterwards, the pipeline opens a PR against the GitOps repo and prod stays
+fully auto-sync. The approval becomes a reviewable, attributable record enforced by branch
+protection and CODEOWNERS, in the same place all other change control lives — and Git equals
+the cluster for prod too, with no deliberate drift. Combined with two instances, prod's
+ArgoCD only ever *sees* approved state.
+
+That requires a credential the current design deliberately avoids: a deploy key can push a
+branch but cannot open a PR. The right answer is a **GitHub App** scoped to the GitOps repo
+with `contents: write` and `pull_requests: write` — not a personal access token.
+
+**Automated promotion gates above a certain deploy frequency.** A human reading a one-line
+digest diff is meaningful review at a few deploys a week. At high frequency it degrades into
+rubber-stamping — control in appearance only. The replacement is Argo Rollouts with an
+`AnalysisTemplate` querying Prometheus for error rate and latency, so promotion is decided by
+evidence and rolls back automatically. The alerts already defined here —
+`SampleNodejsHighErrorRate` in particular — are the kind of query such an analysis step runs.
+Human approval then applies to genuinely high-risk changes rather than to every deploy.
+
+**Kargo** is the purpose-built tool once there are more than two stages, or multiple regions.
+
+---
+
 ## Decisions, and why
 
 ### Deployment, not StatefulSet
@@ -834,8 +954,15 @@ GitOps isolation rather than a limitation to work around.
 **Single node.** No real topology spread, no multi-node failure testing, and the PDB can only be
 demonstrated rather than exercised against a genuine drain.
 
-**Single environment.** Only `dev`. The layout supports adding `staging`/`prod` as sibling
-directories, but promotion between environments is not implemented.
+**"prod" is a namespace, not a production environment.** Two environments exist and promotion
+between them works, but they share one node with ArgoCD and the monitoring stack — so a load
+test in dev can starve prod. See [Environments and promotion](#environments-and-promotion) for
+what is real about it and [What production would do differently](#what-production-would-do-differently)
+for the gap.
+
+**One ArgoCD instance manages both environments**, which means the dev-facing GitOps
+controller holds prod credentials. Separate instances per environment is the correct answer
+and is described above.
 
 **The pull secret holds a broader token than it should.** It should be scoped to `read:packages`
 only. It is a throwaway lab credential and will be revoked, but least privilege is the correct

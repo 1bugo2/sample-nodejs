@@ -1,0 +1,45 @@
+Evidence: promotion to prod is gated, and promotes the same artifact
+Captured 2026-08-16T10:29:32Z - verbatim command output, nothing retyped.
+
+==============================================================
+$ git -C sample-nodejs-gitops log -1 --format="%s" <promotion commit>
+==============================================================
+deploy: sample-nodejs v1.2.0 (prod awaits manual sync)
+
+==============================================================
+$ grep -E "digest|tag" envs/{dev,prod}/values.yaml
+   the SAME digest in both - a promotion, not a rebuild
+==============================================================
+envs/dev/values.yaml
+  digest: "sha256:eda79dcef14f6b9ba608e347466d5b275156b3263ca2c84cbc880fd5326e0cca"
+  tag: v1.2.0
+envs/prod/values.yaml
+  digest: "sha256:eda79dcef14f6b9ba608e347466d5b275156b3263ca2c84cbc880fd5326e0cca"
+  tag: "v1.2.0"
+
+==============================================================
+$ kubectl -n argocd get application
+==============================================================
+NAME                 SYNC STATUS   HEALTH STATUS
+root                 Synced        Healthy
+sample-nodejs-dev    Synced        Healthy
+sample-nodejs-prod   Synced        Healthy
+
+==============================================================
+$ kubectl -n argocd get application -o jsonpath  (automated sync policy)
+   the gate is the ABSENCE of an automated block on prod
+==============================================================
+sample-nodejs-dev    automated={"prune":true,"selfHeal":true}
+sample-nodejs-prod   automated=
+
+==============================================================
+$ image actually running in each namespace
+==============================================================
+sample-nodejs        ghcr.io/1bugo2/sample-nodejs@sha256:eda79dcef14f6b9ba608e347466d5b275156b3263ca2c84cbc880fd5326e0cca
+sample-nodejs-prod   ghcr.io/1bugo2/sample-nodejs@sha256:eda79dcef14f6b9ba608e347466d5b275156b3263ca2c84cbc880fd5326e0cca
+
+==============================================================
+$ curl both Ingress hosts
+==============================================================
+dev  /my-app  HTTP 200  Hello, World!
+prod /my-app  HTTP 200  Hello, World!

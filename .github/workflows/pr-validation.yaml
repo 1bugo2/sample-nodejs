@@ -302,6 +302,24 @@ jobs:
       - name: Install Checkov
         run: pipx install checkov
 
+      - name: Chart docs are in sync with values.yaml
+        # The values table in the chart README is generated from the `# --` comments in
+        # values.yaml. Regenerating it here and failing on any diff is the whole point: a
+        # hand-maintained table of ~70 values drifts silently the first time someone adds a
+        # key, and a stale reference is worse than none. This makes drift impossible rather
+        # than merely discouraged.
+        run: |
+          set -euo pipefail
+          V=1.14.2
+          curl -fsSL "https://github.com/norwoodj/helm-docs/releases/download/v${V}/helm-docs_${V}_Linux_x86_64.tar.gz" \
+            | tar -xz helm-docs
+          ./helm-docs --chart-search-root=charts
+          if ! git diff --exit-code -- "$CHART/README.md"; then
+            echo "::error::$CHART/README.md is stale. Run helm-docs and commit the result."
+            exit 1
+          fi
+          echo "chart README matches values.yaml"
+
       - name: Checkov (advisory)
         # Advisory, not gating. Checkov's OSS checks carry no severity, and it applies
         # Deployment rules to any Pod - it demands readiness and liveness probes on the

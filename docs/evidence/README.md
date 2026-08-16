@@ -25,6 +25,7 @@ a picture.
 
 | File | Shows |
 |---|---|
+| [promotion-gate-pending.txt](promotion-gate-pending.txt) | **The gate at rest.** prod `OutOfSync / Healthy` with `target=1.2.1  last-deployed=1.2.0`, different digests genuinely running in each namespace, and prod still serving 200. Also records why `status.history` is the field to read and `status.sync.revisions` is not — the latter is only the *target*, and reading it is how you wrongly conclude prod is already on the new version |
 | [promotion-gate.txt](promotion-gate.txt) | Verbatim transcript: the **same digest** in both environment files, prod's `syncPolicy.automated` empty while dev's is populated, the identical image running in both namespaces, and both Ingress hosts serving. Reasoning is in the [README](../../README.md#environments-and-promotion) rather than repeated here |
 | [digest-and-registry-proof.txt](digest-and-registry-proof.txt) | The deployed image digest matches the digest committed to the GitOps repo, and an anonymous client gets **403** on the image while the chart returns **200** |
 | [hpa-autoscaling.md](hpa-autoscaling.md) | 1,077,610 requests, **0 failed**, scaled 2 → 6, then held before scaling back down |

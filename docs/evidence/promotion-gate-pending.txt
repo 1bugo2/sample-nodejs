@@ -1,0 +1,32 @@
+Evidence: the gate at rest - prod OutOfSync/Healthy with a pending promotion
+Captured 2026-08-16T10:37:10Z - verbatim output.
+
+=== the promotion commit wrote the SAME new digest to both environments ===
+30ba66e deploy: sample-nodejs v1.2.1 (prod awaits manual sync)
+envs/dev/values.yaml    digest: "sha256:51f5bd117a161cdda3f66933220015fe2285426e6a79a5656f62eaeb12e236c1"
+envs/prod/values.yaml    digest: "sha256:51f5bd117a161cdda3f66933220015fe2285426e6a79a5656f62eaeb12e236c1"
+
+=== ArgoCD: dev applied it, prod has not ===
+NAME                 SYNC STATUS   HEALTH STATUS
+root                 Synced        Healthy
+sample-nodejs-dev    Synced        Healthy
+sample-nodejs-prod   OutOfSync     Healthy
+
+=== what each is TARGETING vs what it last DEPLOYED ===
+sample-nodejs-dev    target=1.2.1   last-deployed=1.2.1
+sample-nodejs-prod   target=1.2.1   last-deployed=1.2.0
+
+   status.history is the field that says what was actually deployed.
+   status.sync.revisions is only the TARGET - reading that instead is how
+   you conclude prod is on the new version when it is not.
+
+=== the images actually running right now ===
+sample-nodejs        sha256:51f5bd117a161cdda3f66933220015fe2285426e6a79a5656f62eaeb12e236c1
+sample-nodejs-prod   sha256:eda79dcef14f6b9ba608e347466d5b275156b3263ca2c84cbc880fd5326e0cca
+
+   Different digests: dev has the promotion, prod is still on the previous
+   release and serving traffic normally - which is why health is Healthy,
+   not Missing or Degraded.
+
+=== prod still serving while a promotion is pending ===
+prod /my-app  HTTP 200  Hello, World!

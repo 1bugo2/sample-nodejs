@@ -54,7 +54,7 @@ Requests through the Ingress during and after:
 Two chart settings produce that. `maxUnavailable: 0` means a replacement pod must pass its
 readiness probe before an old one is removed. The `preStop` sleep of 5s holds a terminating
 pod open while the endpoints controller de-registers it, so in-flight requests are not cut
-off — necessary because `tini` makes node exit almost immediately on SIGTERM, leaving no
+off, necessary because `tini` makes node exit almost immediately on SIGTERM, leaving no
 natural drain window.
 
 ## The deploy log
@@ -77,14 +77,14 @@ without any audit tooling.
 The first attempt at this demonstration could not proceed, and the reason was informative.
 
 `v1.0.1` was released from a **docs-only** change, and its image digest came out
-**byte-identical** to `v1.0.0` — `.dockerignore` excludes `*.md`, so nothing entering the
+**byte-identical** to `v1.0.0`: `.dockerignore` excludes `*.md`, so nothing entering the
 build had changed. Reproducible builds working correctly, but it left nothing to roll back
 between.
 
 Investigating that surfaced a real defect: the release pipeline promoted the **image
 digest** but never the **chart version**. Chart `1.0.1` sat published in GHCR while the
 Application still tracked `1.0.0`. A change to a probe timing, a resource limit or a
-securityContext would have been built, scanned, signed, pushed — and then silently ignored
+securityContext would have been built, scanned, signed, pushed, and then silently ignored
 by the cluster, with a green pipeline the whole way. Fixed in
 [PR #10](https://github.com/1bugo2/sample-nodejs/pull/10), which also added OCI provenance
 labels so that a running container is traceable to the commit that built it.

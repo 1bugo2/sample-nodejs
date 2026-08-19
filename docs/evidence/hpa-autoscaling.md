@@ -17,7 +17,7 @@ autoscaling:
 
 The 70% target is a percentage of the **CPU request**, not of a core. With
 `requests.cpu: 100m`, scaling begins once average usage passes ~70m per pod. This is why
-the request had to be a realistic number rather than an arbitrarily small one — an
+the request had to be a realistic number rather than an arbitrarily small one: an
 unrealistically low request makes the target meaningless.
 
 ## Baseline (idle)
@@ -87,6 +87,6 @@ ignoreDifferences:
 ```
 
 Without it, `selfHeal: true` would see 6 replicas in the cluster against the chart's
-value and revert the HPA's decision on every sync — ArgoCD and the autoscaler fighting
+value and revert the HPA's decision on every sync, ArgoCD and the autoscaler fighting
 each other. The chart also omits `spec.replicas` entirely when autoscaling is enabled,
 for the same reason.

@@ -17,7 +17,7 @@ something broke.
 
 Traefik sits in front of every request and already exposes per-service request counts by
 status code and duration histograms. k3s starts it with `--metrics.prometheus=true` and a
-named `metrics` port, so a `PodMonitor` is enough — no change to the Traefik deployment,
+named `metrics` port, so a `PodMonitor` is enough: no change to the Traefik deployment,
 which matters because k3s manages it through a `HelmChart` CR that would overwrite a manual
 edit.
 
@@ -53,7 +53,7 @@ nodejs_eventloop_lag_seconds{pod="sample-nodejs-dev-568b5744fb-..."} = 0.0107
 | `SampleNodejsNoReadyReplicas` | 0 available for 2m | Service has no endpoints |
 
 **Event loop lag is the one worth arguing for.** Node is single-threaded: if the loop is
-blocked, the process is alive but doing no work — and it will still answer a liveness probe
+blocked, the process is alive but doing no work, and it will still answer a liveness probe
 if the probe's timeout is generous. `/live` returning 200 proves nothing in that state. Lag
 is the only metric that catches it. Measured idle at ~11ms, so the 200ms threshold is well
 clear of normal operation.
@@ -66,7 +66,7 @@ SampleNodejsEventLoopBlocked    SampleNodejsAutoscalerAtCeiling
 SampleNodejsMemoryNearLimit     SampleNodejsNoReadyReplicas
 ```
 
-All `inactive` — the application is healthy.
+All `inactive`. The application is healthy.
 
 ## The dashboard is a ConfigMap, not a UI artifact
 
@@ -87,7 +87,7 @@ limit).
 **1. The default rules assume a kubeadm cluster.** k3s runs the scheduler,
 controller-manager, etcd and kube-proxy inside a single process, so those default
 `ServiceMonitor`s have nothing to scrape and sit permanently down. They are disabled in the
-values — a wall of red trains people to ignore the alerting you just built.
+values: a wall of red trains people to ignore the alerting you just built.
 
 **2. Prometheus was scraping the kubelet over IPv6 and failing.** The node carries a ULA
 IPv6 address that k3s's kubelet does not listen on, so the operator generated three IPv6
@@ -107,4 +107,4 @@ firing: Watchdog        ← by design; a dead-man's switch proving the pipeline 
 SampleNodejs alerts active: 0
 ```
 
-Grafana: `http://grafana.192-168-56-101.nip.io` — reachable from the host, returns 200.
+Grafana: `http://grafana.192-168-56-101.nip.io`, reachable from the host, returns 200.

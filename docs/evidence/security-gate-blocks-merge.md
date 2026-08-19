@@ -2,7 +2,7 @@
 
 A gate that reports but cannot stop anything is documentation. This is a deliberate
 demonstration that the gates have teeth, kept as
-[PR #8](https://github.com/1bugo2/sample-nodejs/pull/8) — opened to fail, never merged.
+[PR #8](https://github.com/1bugo2/sample-nodejs/pull/8). Opened to fail, never merged.
 
 ## What was planted
 
@@ -14,13 +14,13 @@ demonstration that the gates have teeth, kept as
    }
 ```
 
-A real, well-known, fixable HIGH advisory — not a synthetic marker file.
+A real, well-known, fixable HIGH advisory, not a synthetic marker file.
 
 ## What caught it
 
 Two **independent** gates, at two different layers:
 
-### 1. `Dependency scan` — the source
+### 1. `Dependency scan`: the source
 
 Trivy against the lockfile:
 
@@ -31,11 +31,11 @@ Total: 2 (HIGH: 2, CRITICAL: 0)
 │        │ CVE-2026-4800  │      │       │         │ 4.18.0  │ arbitrary code execution via untrusted input
 ```
 
-`npm audit` independently agreed — `1 high severity vulnerability` — which is the point of
+`npm audit` independently agreed with `1 high severity vulnerability`, which is the point of
 running both: they draw on different advisory databases, and agreement raises confidence
 while disagreement is itself signal.
 
-### 2. `Image build, smoke test and scan` — the artifact
+### 2. `Image build, smoke test and scan`: the artifact
 
 The same vulnerability was caught *again* by the Trivy **image** scan, because `lodash`
 ends up inside `node_modules` in the built image. Defence in depth: even if a dependency
@@ -72,5 +72,5 @@ PR opened ──► Dependency scan  FAIL ──┐
 ```
 
 The vulnerable code never reached `main`, so the release pipeline never ran, so no image
-was published and no digest was promoted. The cluster was never at risk — which is the
+was published and no digest was promoted. The cluster was never at risk, which is the
 difference between blocking at the gate and detecting after deployment.

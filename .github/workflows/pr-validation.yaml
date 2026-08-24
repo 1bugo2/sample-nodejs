@@ -70,7 +70,7 @@ jobs:
         # findings always get uploaded even when the gate is going to fail.
 
       - name: Upload findings to code scanning
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v3
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
         # Upload even on a failing gate, but only if the scan got far enough to write a
         # report - otherwise a failed build adds a misleading "path does not exist" error.
         if: always() && hashFiles('semgrep.sarif') != ''
@@ -117,7 +117,7 @@ jobs:
           # the unfixed and low-severity findings the gate below deliberately tolerates.
 
       - name: Upload findings to code scanning
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v3
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
         # Upload even on a failing gate, but only if the scan got far enough to write a
         # report - otherwise a failed build adds a misleading "path does not exist" error.
         if: always() && hashFiles('trivy-fs.sarif') != ''
@@ -170,7 +170,7 @@ jobs:
       # docker-container driver, which supports both `cache-to: type=gha` and loading the
       # result into the local daemon so the smoke test can run it.
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build image
         # Deliberately built and NOT pushed. Nothing reaches a registry from a pull
@@ -233,7 +233,7 @@ jobs:
           output: trivy-image.sarif
 
       - name: Upload findings to code scanning
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v3
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
         # Upload even on a failing gate, but only if the scan got far enough to write a
         # report - otherwise a failed build adds a misleading "path does not exist" error.
         if: always() && hashFiles('trivy-image.sarif') != ''
@@ -329,7 +329,7 @@ jobs:
         run: checkov -d "$CHART" --framework helm --compact --quiet --soft-fail -o sarif --output-file-path .
 
       - name: Upload Checkov findings to code scanning
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v3
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
         if: always() && hashFiles('results.sarif') != ''
         with:
           sarif_file: results.sarif
